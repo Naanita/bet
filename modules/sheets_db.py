@@ -91,7 +91,8 @@ class GoogleSheetsManager:
             return False
 
     def approve_payment(self, telegram_id: str, name: str, username: str,
-                         monto: int = 50000, metodo: str = "Manual"):
+                         monto: int = 50000, metodo: str = "Manual",
+                         phone: str = "", transaction: str = ""):
         try:
             ws      = self._ws("Usuarios_Premium")
             records = ws.get_all_records()
@@ -106,15 +107,15 @@ class GoogleSheetsManager:
 
             if row_index:
                 renovaciones = int(records[row_index - 2].get("Renovaciones", 0)) + 1
-                ws.update(f"A{row_index}:J{row_index}", [[
-                    str(telegram_id), name, username,
+                ws.update(f"A{row_index}:L{row_index}", [[
+                    str(telegram_id), name, username, phone,
                     records[row_index - 2].get("Fecha_Registro", today),
-                    vence, "ACTIVO", monto, metodo, renovaciones, ""
+                    vence, "ACTIVO", monto, metodo, transaction, renovaciones, ""
                 ]])
             else:
                 ws.append_row([
-                    str(telegram_id), name, username,
-                    today, vence, "ACTIVO", monto, metodo, 1, ""
+                    str(telegram_id), name, username, phone,
+                    today, vence, "ACTIVO", monto, metodo, transaction, 1, ""
                 ])
 
             logger.info(f"Usuario {telegram_id} activado hasta {vence}")

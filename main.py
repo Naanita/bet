@@ -5,7 +5,7 @@ import pandas as pd
 from modules.sheets_db import sheets_db
 from modules.risk import RiskEngine
 from modules.odds_api import OddsAPI
-from modules.pipeline_v4 import run_advanced_pipeline as run_quant_pipeline
+from modules.pipeline_v5 import run_pipeline_v5 as run_quant_pipeline
 from modules.free_channel import (
     send_free_picks, send_result_to_free_channel,
     send_daily_recap_to_free_channel, send_monthly_recap,
@@ -40,7 +40,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ASK_NAME, ASK_RECEIPT = range(2)
+ASK_NAME, ASK_PHONE, ASK_PLATFORM, ASK_TRANSACTION, ASK_RECEIPT = range(5)
 
 
 # ─────────────────────────────────────────────
@@ -483,45 +483,151 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("Para generar tu perfil, escribe tu **nombre completo**:",
-                                   parse_mode='Markdown')
+    await query.edit_message_text(
+        "📝 <b>REGISTRO DE SUSCRIPCION</b>\n\n"
+        "Paso 1/4 — Escribe tu <b>nombre completo</b> (como aparece en tu documento de identidad):",
+        parse_mode='HTML')
     return ASK_NAME
 
 
 async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['temp_name'] = update.message.text
-    msg = (
-        f"💳 <b>PASARELA DE PAGOS — {config.BOT_NAME}</b>\n\n"
-        f"💵 <b>Precio:</b> $50.000 COP/mes\n\n"
-        f"1. 🟡 <b>Nequi:</b>\n<code>TU_NUMERO_NEQUI</code>\n\n"
-        f"2. 🏦 <b>Bancolombia:</b>\n<code>TU_CUENTA</code>\n\n"
-        f"3. 💜 <b>Daviplata:</b>\n<code>TU_NUMERO</code>\n\n"
-        f"📌 Envia la <b>FOTO</b> del comprobante."
-    )
-    await update.message.reply_text(msg, parse_mode='HTML')
+    context.user_data['temp_name'] = update.message.text.strip()
+    await update.message.reply_text(
+        "📱 <b>Paso 2/4</b> — Escribe tu <b>numero de celular / WhatsApp</b>:\n\n"
+        "<i>Ejemplo: 3001234567</i>",
+        parse_mode='HTML')
+    return ASK_PHONE
+
+
+async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['temp_phone'] = update.message.text.strip()
+    keyboard = [
+        [InlineKeyboardButton("🟡 Nequi",       callback_data="platform_Nequi")],
+        [InlineKeyboardButton("🏦 Bancolombia",  callback_data="platform_Bancolombia")],
+        [InlineKeyboardButton("💜 Daviplata",    callback_data="platform_Daviplata")],
+    ]
+    await update.message.reply_text(
+        f"💳 <b>Paso 3/4</b> — Selecciona el <b>metodo de pago</b>:\n\n"
+        f"💵 Valor: <b>{config.PRECIO_SUSCRIPCION}</b>",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard))
+    return ASK_PLATFORM
+
+
+_PAYMENT_INFO = {
+    "Nequi": (
+        "🟡 <b>NEQUI</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📲 Numero: <code>{'{NEQUI}'}</code>\n\n"
+        "1. Abre Nequi\n"
+        "2. Toca <b>Enviar dinero</b>\n"
+        "3. Ingresa el numero y el valor\n"
+        "4. Guarda el <b>numero de referencia</b> del comprobante"
+    ),
+    "Bancolombia": (
+        "🏦 <b>BANCOLOMBIA</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏦 Cuenta de ahorros: <code>{'{BANCOLOMBIA}'}</code>\n\n"
+        "1. Abre tu app Bancolombia\n"
+        "2. Ve a <b>Transferencias</b>\n"
+        "3. Ingresa el numero de cuenta y el valor\n"
+        "4. Guarda el <b>numero de referencia</b> del comprobante"
+    ),
+    "Daviplata": (
+        "💜 <b>DAVIPLATA</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📲 Numero: <code>{'{DAVIPLATA}'}</code>\n\n"
+        "1. Abre Daviplata\n"
+        "2. Toca <b>Enviar</b>\n"
+        "3. Ingresa el numero y el valor\n"
+        "4. Guarda el <b>numero de referencia</b> del comprobante"
+    ),
+}
+
+
+async def receive_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    platform = query.data.replace("platform_", "")
+    context.user_data['temp_platform'] = platform
+
+    template = _PAYMENT_INFO.get(platform, "Plataforma seleccionada: <b>{platform}</b>")
+    info = (template
+            .replace("{NEQUI}",       config.NEQUI_NUMERO)
+            .replace("{BANCOLOMBIA}", config.BANCOLOMBIA_CUENTA)
+            .replace("{DAVIPLATA}",   config.DAVIPLATA_NUMERO))
+
+    await query.edit_message_text(
+        f"{info}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Valor a pagar: <b>{config.PRECIO_SUSCRIPCION}</b>\n\n"
+        f"🔢 <b>Paso 4/4</b> — Cuando hayas pagado, escribe el\n"
+        f"<b>numero de referencia</b> de la transaccion:",
+        parse_mode='HTML')
+    return ASK_TRANSACTION
+
+
+async def receive_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['temp_transaction'] = update.message.text.strip()
+    platform = context.user_data.get('temp_platform', '')
+    await update.message.reply_text(
+        f"✅ <b>Referencia registrada</b>\n\n"
+        f"Metodo: <b>{platform}</b>\n"
+        f"Referencia: <code>{context.user_data['temp_transaction']}</code>\n\n"
+        f"📸 Por ultimo, envia la <b>foto del comprobante</b> de pago.",
+        parse_mode='HTML')
     return ASK_RECEIPT
 
 
 async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
-        await update.message.reply_text("❌ Envia una IMAGEN del comprobante.")
+        await update.message.reply_text("❌ Envia una <b>IMAGEN</b> del comprobante.", parse_mode='HTML')
         return ASK_RECEIPT
-    photo_file = update.message.photo[-1].file_id
-    user       = update.effective_user
-    name       = context.user_data.get('temp_name', user.first_name)
-    if 'pending_users' not in context.bot_data: context.bot_data['pending_users'] = {}
+
+    photo_file  = update.message.photo[-1].file_id
+    user        = update.effective_user
+    name        = context.user_data.get('temp_name', user.first_name)
+    phone       = context.user_data.get('temp_phone', 'N/A')
+    platform    = context.user_data.get('temp_platform', 'N/A')
+    transaction = context.user_data.get('temp_transaction', 'N/A')
+    username    = f"@{user.username}" if user.username else "Sin usuario"
+
+    if 'pending_users' not in context.bot_data:
+        context.bot_data['pending_users'] = {}
     context.bot_data['pending_users'][str(user.id)] = {
-        'name': name, 'username': f"@{user.username}" if user.username else "N/A"
+        'name':        name,
+        'username':    username,
+        'phone':       phone,
+        'platform':    platform,
+        'transaction': transaction,
     }
+
     keyboard = [
         [InlineKeyboardButton("✅ Aprobar", callback_data=f"approve_{user.id}")],
         [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{user.id}")]
     ]
+    caption = (
+        f"🔔 <b>NUEVO PAGO RECIBIDO</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Nombre:</b> {name}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{user.id}</code>\n"
+        f"📱 <b>Usuario:</b> {username}\n"
+        f"📞 <b>Celular:</b> <code>{phone}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💳 <b>Metodo:</b> {platform}\n"
+        f"🔢 <b>Referencia:</b> <code>{transaction}</code>"
+    )
     await context.bot.send_photo(
-        chat_id=config.ADMIN_CHAT_ID, photo=photo_file,
-        caption=f"🔔 <b>PAGO RECIBIDO</b>\n👤 {name}\n🆔 {user.id}",
-        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-    await update.message.reply_text("⏳ <b>Verificando transaccion...</b>", parse_mode='HTML')
+        chat_id=config.ADMIN_CHAT_ID,
+        photo=photo_file,
+        caption=caption,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML')
+    await update.message.reply_text(
+        "⏳ <b>Comprobante recibido.</b>\n\n"
+        "Un administrador verificara tu pago en los proximos minutos.\n"
+        "Te notificaremos cuando tu acceso sea activado. ✅",
+        parse_mode='HTML')
     return ConversationHandler.END
 
 
@@ -532,19 +638,82 @@ async def admin_decision_callback(update: Update, context: ContextTypes.DEFAULT_
     action, target_user_id = query.data.split('_', 1)
     pending_data = context.bot_data.get('pending_users', {}).get(target_user_id, {})
     if action == "approve":
-        sheets_db.approve_payment(target_user_id, pending_data.get('name','Usuario'), pending_data.get('username','N/A'))
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ APROBADA", parse_mode='HTML')
+        # 1. Registrar en Google Sheets
+        sheets_db.approve_payment(
+            target_user_id,
+            pending_data.get('name', 'Usuario'),
+            pending_data.get('username', 'N/A'),
+            phone=pending_data.get('phone', ''),
+            metodo=pending_data.get('platform', 'Manual'),
+            transaction=pending_data.get('transaction', ''),
+        )
+
+        # 2. Verificar que quedo activo en sheets
+        activo = sheets_db.check_subscription(int(target_user_id))
+        estado_tag = "✅ Verificado en base de datos" if activo else "⚠️ Verificar manualmente en sheets"
+
+        # 3. Generar enlace de invitacion unico al canal premium
+        invite_link = None
         try:
-            await context.bot.send_message(chat_id=target_user_id,
-                text=f"🎉 <b>PAGO CONFIRMADO</b>\nBienvenido a {config.BOT_NAME}.\nUsa /today", parse_mode='HTML')
-        except Exception: pass
+            link_obj = await context.bot.create_chat_invite_link(
+                chat_id=config.CHANNEL_ID_BANKERS,
+                member_limit=1,
+                name=f"Acceso {pending_data.get('name','')[:20]}",
+            )
+            invite_link = link_obj.invite_link
+        except Exception as e:
+            logger.warning(f"No se pudo generar invite link: {e}")
+
+        # 4. Actualizar caption del admin
+        await query.edit_message_caption(
+            caption=f"{query.message.caption}\n\n✅ APROBADA\n{estado_tag}",
+            parse_mode='HTML')
+
+        # 5. Notificar al usuario con el link
+        try:
+            if invite_link:
+                keyboard = [[InlineKeyboardButton("🔒 Entrar al canal premium", url=invite_link)]]
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=(
+                        f"🎉 <b>PAGO CONFIRMADO</b>\n\n"
+                        f"Bienvenido a <b>{config.BOT_NAME}</b>.\n\n"
+                        f"Toca el boton para acceder al canal premium 👇"
+                    ),
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=(
+                        f"🎉 <b>PAGO CONFIRMADO</b>\n\n"
+                        f"Bienvenido a <b>{config.BOT_NAME}</b>.\n"
+                        f"Usa /today para ver los picks del dia."
+                    ),
+                    parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"No se pudo notificar al usuario {target_user_id}: {e}")
+
     elif action == "reject":
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ RECHAZADO", parse_mode='HTML')
-        url = f"https://t.me/{config.SUPPORT_USERNAME.replace('@','')}?text=Hola, mi ID es {target_user_id}."
+        await query.edit_message_caption(
+            caption=f"{query.message.caption}\n\n❌ RECHAZADO",
+            parse_mode='HTML')
         try:
-            await context.bot.send_message(chat_id=target_user_id, text="❌ Transaccion no validada.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎧 Soporte", url=url)]]))
-        except Exception: pass
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    "❌ <b>Comprobante no valido</b>\n\n"
+                    "Tu pago no pudo ser verificado.\n\n"
+                    "Por favor envia un comprobante valido con:\n"
+                    "• Fecha y hora de la transaccion\n"
+                    "• Numero de referencia visible\n"
+                    "• Valor pagado\n\n"
+                    "Inicia nuevamente con /start."
+                ),
+                parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"No se pudo notificar rechazo a {target_user_id}: {e}")
+
     await query.answer()
 
 
@@ -756,8 +925,10 @@ async def ask_receipt_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 
 def main():
+    import sys, io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     print("=========================================")
-    print(f"🚀 {config.BOT_NAME} v4.2")
+    print(f"[BOT] {config.BOT_NAME} v5.0")
     print(f"[*] Admin:          {config.ADMIN_CHAT_ID}")
     print(f"[*] Canal gratuito: {config.CHANNEL_ID_FREE or 'No configurado'}")
     print(f"[*] Canal premium:  {config.CHANNEL_ID_BANKERS or 'No configurado'}")
@@ -784,6 +955,15 @@ def main():
             ASK_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_name),
             ],
+            ASK_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone),
+            ],
+            ASK_PLATFORM: [
+                CallbackQueryHandler(receive_platform, pattern='^platform_'),
+            ],
+            ASK_TRANSACTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_transaction),
+            ],
             ASK_RECEIPT: [
                 MessageHandler(filters.PHOTO, receive_receipt),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ask_receipt_text),
@@ -791,6 +971,7 @@ def main():
         },
         fallbacks=[CommandHandler('cancel', start_command)],
         per_message=False,
+        allow_reentry=True,
     )
 
     app.add_handler(CommandHandler("start",        start_command))

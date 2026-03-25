@@ -135,6 +135,7 @@ def _find_prob_for_market(market: str, true_probs: dict) -> float | None:
 def _get_market_icon(market: str) -> str:
     m = market.lower()
     if "banker" in m:                    return "💎"
+    if "nba" in m or "puntos nba" in m:  return "🏀"
     if "mas de" in m or "menos de" in m: return "🎯"
     if "ambos anotan" in m:              return "⚽"
     return "⚽"
@@ -152,7 +153,6 @@ async def run_advanced_pipeline(target_date: str, current_bankroll: float) -> li
     7. Alinea odds con Rushbet
     """
     import config
-    from modules.data import DataEngine
     from modules.advanced_model import MatchAnalyzer
     from modules.risk import RiskEngine
     from modules.odds_api import OddsAPI
@@ -160,33 +160,45 @@ async def run_advanced_pipeline(target_date: str, current_bankroll: float) -> li
     from modules.fbref_engine import fbref_engine
     from modules.injuries_engine import get_injuries_engine
 
-    data_engine = DataEngine(season='2025')
-    stats_df    = data_engine.get_season_xg_stats()
-    injuries_e  = get_injuries_engine()
+    # ── Understat / ClubElo (opcional — si falla continua sin datos xG elite) ──
+    xg_matches_today = pd.DataFrame()
+    stats_df         = pd.DataFrame()
+    injuries_e       = None
+    data_engine      = None
+    try:
+        from modules.data import DataEngine
+        data_engine  = DataEngine(season='2025')
+        stats_df     = data_engine.get_season_xg_stats()
+        injuries_e   = get_injuries_engine()
+        schedule     = data_engine.understat.read_schedule().reset_index()
+        if isinstance(schedule.columns, pd.MultiIndex):
+            schedule.columns = ['_'.join(str(i) for i in col if i).strip().lower()
+                                for col in schedule.columns]
+        else:
+            schedule.columns = [str(c).lower() for c in schedule.columns]
+        date_col = 'datetime' if 'datetime' in schedule.columns else 'date'
+        schedule['match_time_local'] = (
+            pd.to_datetime(schedule[date_col], utc=True)
+            .dt.tz_convert(config.TIMEZONE)
+        )
+        schedule['date_str'] = schedule['match_time_local'].dt.strftime('%Y-%m-%d')
+        xg_matches_today     = schedule[schedule['date_str'] == target_date]
+        logger.info(f"Partidos elite ({target_date}): {len(xg_matches_today)}")
+    except Exception as e:
+        logger.warning(f"Understat/ClubElo no disponible (modo Rushbet-only): {e}")
 
-    schedule = data_engine.understat.read_schedule().reset_index()
-    if isinstance(schedule.columns, pd.MultiIndex):
-        schedule.columns = ['_'.join(str(i) for i in col if i).strip().lower()
-                            for col in schedule.columns]
-    else:
-        schedule.columns = [str(c).lower() for c in schedule.columns]
-
-    date_col = 'datetime' if 'datetime' in schedule.columns else 'date'
-    schedule['match_time_local'] = (
-        pd.to_datetime(schedule[date_col], utc=True)
-        .dt.tz_convert(config.TIMEZONE)
-    )
-    schedule['date_str']   = schedule['match_time_local'].dt.strftime('%Y-%m-%d')
-    xg_matches_today       = schedule[schedule['date_str'] == target_date]
-
-    logger.info(f"Partidos elite ({target_date}): {len(xg_matches_today)}")
-
-    # OddsAPI
-    odds_api    = OddsAPI()
-    live_odds   = odds_api.get_all_sports_odds()
-    if live_odds in ["MOCK", "API_LIMIT"]:
-        return []
-    soccer_odds = live_odds.get('soccer', {})
+    # ── OddsAPI (opcional — si falla o limite agotado, continua con Rushbet) ──
+    soccer_odds = {}
+    try:
+        odds_api  = OddsAPI()
+        live_odds = odds_api.get_all_sports_odds()
+        if live_odds not in ["MOCK", "API_LIMIT"]:
+            soccer_odds = live_odds.get('soccer', {})
+            logger.info(f"OddsAPI: {len(soccer_odds)} partidos de futbol")
+        else:
+            logger.warning(f"OddsAPI no disponible ({live_odds}) — usando solo Rushbet")
+    except Exception as e:
+        logger.warning(f"OddsAPI error: {e} — usando solo Rushbet")
 
     # Rushbet — obtener todos los mercados incluyendo corners y tarjetas
     logger.info("Obteniendo mercados completos de Rushbet (corners, tarjetas, etc.)...")
@@ -197,8 +209,8 @@ async def run_advanced_pipeline(target_date: str, current_bankroll: float) -> li
     opportunities = []
     processed     = set()
 
-    # ── LIGAS ELITE ──
-    for _, match in xg_matches_today.iterrows():
+    # ── LIGAS ELITE (solo si Understat disponible) ──
+    for _, match in (xg_matches_today.iterrows() if not xg_matches_today.empty else iter([])):
         home = match['home_team']
         away = match['away_team']
 
@@ -219,7 +231,7 @@ async def run_advanced_pipeline(target_date: str, current_bankroll: float) -> li
         away_card_stats   = fbref_engine.get_card_stats(away, league)
 
         # H2H
-        h2h = injuries_e.get_h2h(home, away)
+        h2h = injuries_e.get_h2h(home, away) if injuries_e else {}
 
         # Odds de OddsAPI
         match_data = _find_match_odds(home, away, soccer_odds)
@@ -238,7 +250,7 @@ async def run_advanced_pipeline(target_date: str, current_bankroll: float) -> li
         true_probs = analyzer.get_all_probabilities()
 
         # ELO — Banker
-        elo_prob = data_engine.get_elo_prob(home, away)
+        elo_prob = data_engine.get_elo_prob(home, away) if data_engine else 0.0
         if elo_prob > 0.75 and match_odds.get("Gana Local", 0) > 1.25:
             opportunities.append({
                 "sport": "💎", "time": match_time,
@@ -384,13 +396,35 @@ async def run_advanced_pipeline(target_date: str, current_bankroll: float) -> li
                             "league":     league_id,
                         })
 
+    # ── NBA (Ball Don't Lie API — gratuita) ──
+    try:
+        import asyncio
+        from modules.balldontlie_engine import BallDontLieEngine
+        bdl = BallDontLieEngine(api_key=config.BALLDONTLIE_API_KEY)
+        nba_picks = await asyncio.to_thread(
+            bdl.get_nba_picks,
+            current_bankroll,
+            config.MIN_PROBABILITY,
+            config.MIN_EV_THRESHOLD,
+        )
+        if nba_picks:
+            logger.info(f"NBA picks (Ball Don't Lie): {len(nba_picks)}")
+            opportunities.extend(nba_picks)
+        else:
+            logger.info("NBA: sin picks con EV positivo hoy.")
+    except Exception as e:
+        logger.warning(f"NBA pipeline error (no critico): {e}")
+
     opportunities.sort(key=lambda x: x["ev"], reverse=True)
     logger.info(f"Oportunidades antes de alineacion final: {len(opportunities)}")
 
-    # Alinear con Rushbet pasando el scrape ya hecho (evita doble scrape)
-    opportunities.sort(key=lambda x: x["ev"], reverse=True)
-    final = await align_odds_with_rushbet(opportunities, rushbet_games=rushbet_soccer)
+    # Alinear con Rushbet (solo picks de futbol — los de NBA conservan sus odds)
+    soccer_opps = [o for o in opportunities if o.get("sport") != "🏀"]
+    nba_opps    = [o for o in opportunities if o.get("sport") == "🏀"]
+
+    final_soccer = await align_odds_with_rushbet(soccer_opps, rushbet_games=rushbet_soccer)
+    final = final_soccer + nba_opps
     final.sort(key=lambda x: x["ev"], reverse=True)
 
-    logger.info(f"Total picks validos: {len(final)}")
+    logger.info(f"Total picks validos: {len(final)} ({len(final_soccer)} futbol + {len(nba_opps)} NBA)")
     return final

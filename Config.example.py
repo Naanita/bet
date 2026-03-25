@@ -1,18 +1,19 @@
-# config.example.py — v4
-# Copia este archivo como config.py y rellena con tus credenciales reales
-# NO subas config.py al repositorio
+# config.example.py — v5
+# Las credenciales van en el archivo .env (copia .env.example como .env)
+# NO hardcodees keys aqui ni en config.py
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================
-# CREDENCIALES
+# CREDENCIALES (desde .env)
 # ==========================================
-ODDS_API_KEY   = "TU_ODDS_API_KEY_AQUI"
-TELEGRAM_TOKEN = "TU_TELEGRAM_BOT_TOKEN_AQUI"
-
-# API-Football (gratuita: 100 req/dia)
-# Registro: https://rapidapi.com/api-sports/api/api-football
-API_FOOTBALL_KEY = None   # "TU_KEY_AQUI"
+ODDS_API_KEY        = os.getenv("ODDS_API_KEY", "")
+TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "")
+API_FOOTBALL_KEY    = os.getenv("API_FOOTBALL_KEY") or None
+BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY") or None  # NBA gratuita
 
 # ==========================================
 # ZONA HORARIA

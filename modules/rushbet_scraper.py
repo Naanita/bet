@@ -315,7 +315,55 @@ def _parse_full_event(home: str, away: str, sport: str,
                 elif otype == "OT_CROSS": odds_dict["HT Empate"]    = _kambi_odd_to_decimal(raw)
                 elif otype == "OT_TWO": odds_dict["HT Gana Visita"] = _kambi_odd_to_decimal(raw)
 
-    if not odds_dict.get("Gana Local"):
+        # ── Basketball / Tennis: Ganador (2-way, sin empate) ──
+        elif sport in ("basketball", "tennis") and \
+             (criterion_en in ["Match", "To Win Match", "Full Time", "Match Result",
+                                "Moneyline", "Winner", "Match Odds"]
+              or "moneyline" in en_lower or "match odds" in en_lower) and len(outcomes) == 2:
+            for o in outcomes:
+                otype = o.get("type", "")
+                raw   = o.get("odds", 0)
+                oid   = o.get("id", "")
+                if not raw or o.get("status") == "SUSPENDED": continue
+                decimal = _kambi_odd_to_decimal(raw)
+                if otype == "OT_ONE":
+                    odds_dict["Gana Local"]  = decimal
+                    outcome_ids["__oid_Gana Local"] = oid
+                elif otype == "OT_TWO":
+                    odds_dict["Gana Visita"] = decimal
+                    outcome_ids["__oid_Gana Visita"] = oid
+
+        # ── Basketball: Total de Puntos ──
+        elif sport == "basketball" and (
+             "total points" in en_lower or "points o/u" in en_lower or
+             "total" in en_lower and "points" in en_lower):
+            for o in outcomes:
+                raw   = o.get("odds", 0)
+                otype = o.get("type", "")
+                label = o.get("label", "")
+                line_val = o.get("line", 0)
+                if not raw or not line_val: continue
+                decimal  = _kambi_odd_to_decimal(raw)
+                # Kambi encodes lines as integers × 1000 (e.g. 247000 = 247 pts)
+                line_pts = line_val / 1000 if line_val > 1000 else float(line_val)
+                # Format: if .5 already (e.g. 227.5), keep it; else display as-is
+                if line_pts == int(line_pts):
+                    line_str = str(int(line_pts))
+                else:
+                    line_str = str(line_pts)
+                key_over  = f"Mas de {line_str} pts"
+                key_under = f"Menos de {line_str} pts"
+                if otype == "OT_OVER":
+                    if key_over not in odds_dict:
+                        odds_dict[key_over] = decimal
+                elif otype == "OT_UNDER":
+                    if key_under not in odds_dict:
+                        odds_dict[key_under] = decimal
+
+    # Soccer necesita Gana Local; basketball/tennis pueden tenerlo sin empate
+    if sport == "soccer" and not odds_dict.get("Gana Local"):
+        return None
+    if sport in ("basketball", "tennis") and not odds_dict.get("Gana Local"):
         return None
 
     return {
@@ -447,12 +495,20 @@ async def get_rushbet_odds_async(sport_filter: str = "soccer",
         )
         if not full: continue
 
-        odds   = full.get("odds", {})
-        local  = odds.get("Gana Local", 0)
-        visita = odds.get("Gana Visita", 0)
-        empate = odds.get("Empate", 0)
-        if (1.20 <= local <= 12.0 and 1.20 <= visita <= 12.0 and empate >= 1.40):
-            result[parsed["sport"]].append(full)
+        odds    = full.get("odds", {})
+        local   = odds.get("Gana Local", 0)
+        visita  = odds.get("Gana Visita", 0)
+        empate  = odds.get("Empate", 0)
+        sp      = parsed["sport"]
+
+        if sp == "soccer":
+            valid = (1.20 <= local <= 12.0 and 1.20 <= visita <= 12.0 and empate >= 1.40)
+        else:
+            # Basketball y tennis: solo necesitan local y visita (sin empate)
+            valid = (1.01 <= local <= 20.0 and 1.01 <= visita <= 20.0)
+
+        if valid:
+            result[sp].append(full)
 
     for sport, games in result.items():
         mkt_sample = games[0]["odds"].keys() if games else []

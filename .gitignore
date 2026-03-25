@@ -1,0 +1,66 @@
+# ========================
+# Entorno virtual
+# ========================
+venv/
+env/
+.env
+.venv/
+
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# ========================
+# Credenciales y configs sensibles
+# ========================
+credentials.json
+credentials*.json
+config.py
+*.key
+*.pem
+secrets.*
+
+# ========================
+# Data / archivos generados
+# ========================
+data/
+*.csv
+*.xlsx
+*.json
+!requirements*.json
+
+# ========================
+# Logs y bases de datos
+# ========================
+*.log
+*.sqlite3
+*.db
+
+# ========================
+# IDEs y editores
+# ========================
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ========================
+# Sistema operativo
+# ========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========================
+# Jupyter Notebooks (checkpoints)
+# ========================
+.ipynb_checkpoints/

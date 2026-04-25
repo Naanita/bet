@@ -6,7 +6,8 @@ python-telegram-bot[job-queue]==21.5
 
 # ── APIs de datos ──
 requests>=2.32.5
-understatapi==0.7.1
+# understatapi eliminado: pina idna==2.10 que conflictúa con soccerdata/seleniumbase
+# El pipeline cae automáticamente a KambiConsensus cuando no está disponible
 soccerdata>=1.9.0
 
 # ── Análisis de datos ──

@@ -7,19 +7,15 @@ class MonteCarloEngine:
         """
         Simula 5,000 escenarios de 10 apuestas seguidas con este edge.
         Si la probabilidad de perder el 15% del bankroll es mayor al 5%, rechaza.
+        Vectorizado con NumPy — ~100x más rápido que el bucle Python original.
         """
-        results = []
-        for _ in range(sims):
-            br = current_bankroll
-            for _ in range(10): # Simular racha corta
-                if np.random.rand() < win_prob:
-                    br += stake * edge
-                else:
-                    br -= stake
-            results.append((current_bankroll - br) / current_bankroll) # Drawdown final
-            
-        # Calcula percentil 95 (el peor 5% de los casos)
-        worst_case_drawdown = np.percentile(results, 95)
-        
-        # Si en el peor escenario superamos el límite, no pasa la validación
-        return worst_case_drawdown <= max_drawdown
+        # Matriz (sims × 10): True = apuesta ganada
+        outcomes = np.random.rand(sims, 10) < win_prob
+        # P&L por apuesta: +stake*edge si gana, -stake si pierde
+        pnl = np.where(outcomes, stake * edge, -stake)
+        # Drawdown acumulado al final de las 10 apuestas
+        final_br   = current_bankroll + pnl.sum(axis=1)
+        drawdowns  = (current_bankroll - final_br) / current_bankroll
+        # Percentil 95 → peor 5% de escenarios
+        worst_case = float(np.percentile(drawdowns, 95))
+        return worst_case <= max_drawdown

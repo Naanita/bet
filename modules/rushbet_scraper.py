@@ -7,7 +7,12 @@ import re
 import asyncio
 import logging
 import requests
+from datetime import datetime
 from difflib import SequenceMatcher
+
+import pytz
+
+_BOGOTA = pytz.timezone("America/Bogota")
 
 logger = logging.getLogger(__name__)
 
@@ -198,46 +203,70 @@ def _parse_full_event(home: str, away: str, sport: str,
                 elif label == "X2": odds_dict["X2"] = _kambi_odd_to_decimal(raw)
                 elif label == "12": odds_dict["12"] = _kambi_odd_to_decimal(raw)
 
-        # ── Total de Goles (Over/Under) ──
-        elif criterion_en in ["Total Goals", "Goals Over/Under"] or \
-             "total goals" in en_lower and "half" not in en_lower and \
-             "team" not in en_lower and "1st" not in en_lower and "2nd" not in en_lower:
+        # ── Total de Goles PARTIDO COMPLETO (Over/Under) ──
+        # Usa el campo `line` de Kambi. Para distinguir partido vs equipo aplicamos
+        # un techo de cuota por línea: el total del partido SIEMPRE es más probable
+        # que el de un equipo individual, por lo que su cuota de Over es más baja.
+        # Techo conservador:  O/U 0.5 partido ≤1.30 | 1.5 ≤2.10 | 2.5 ≤2.80 | 3.5 ≤7.0 | 4.5 ≤15.0
+        elif criterion_en in ["Total Goals", "Goals Over/Under"] or (
+             "total goals" in en_lower and "half" not in en_lower and
+             "team" not in en_lower and "1st" not in en_lower and "2nd" not in en_lower and
+             "home" not in en_lower and "away" not in en_lower):
+            _FULL_MATCH_OVER_CAP = {0.5: 1.30, 1.5: 2.10, 2.5: 2.80, 3.5: 7.0, 4.5: 15.0, 5.5: 30.0}
             for o in outcomes:
-                raw   = o.get("odds", 0)
-                otype = o.get("type", "")
-                if not raw: continue
-                decimal = _kambi_odd_to_decimal(raw)
-                # Over 1.5: odds ~1.20-1.45
-                if otype == "OT_OVER" and 1.15 <= decimal <= 1.50:
-                    if "Mas de 1.5" not in odds_dict:
-                        odds_dict["Mas de 1.5"] = decimal
-                        outcome_ids["__oid_Mas de 1.5"] = o.get("id", "")
-                # Under 1.5: odds ~2.50-4.00
-                elif otype == "OT_UNDER" and 2.40 <= decimal <= 4.50:
-                    if "Menos de 1.5" not in odds_dict:
-                        odds_dict["Menos de 1.5"] = decimal
-                        outcome_ids["__oid_Menos de 1.5"] = o.get("id", "")
-                # Over 2.5: odds ~1.50-2.30
-                elif otype == "OT_OVER" and 1.50 <= decimal <= 2.35:
-                    if "Mas de 2.5" not in odds_dict:
-                        odds_dict["Mas de 2.5"] = decimal
-                        outcome_ids["__oid_Mas de 2.5"] = o.get("id", "")
-                # Under 2.5: odds ~1.50-2.30
-                elif otype == "OT_UNDER" and 1.50 <= decimal <= 2.35:
-                    if "Menos de 2.5" not in odds_dict:
-                        odds_dict["Menos de 2.5"] = decimal
-                        outcome_ids["__oid_Menos de 2.5"] = o.get("id", "")
-                # Over 3.5: odds ~2.30-4.00
-                elif otype == "OT_OVER" and 2.35 <= decimal <= 4.50:
-                    if "Mas de 3.5" not in odds_dict:
-                        odds_dict["Mas de 3.5"] = decimal
-                        outcome_ids["__oid_Mas de 3.5"] = o.get("id", "")
-                        outcome_ids["__oid_Mas de 3.5"] = o.get("id", "")
-                # Under 3.5: odds ~1.20-1.50
-                elif otype == "OT_UNDER" and 1.20 <= decimal <= 1.55:
-                    if "Menos de 3.5" not in odds_dict:
-                        odds_dict["Menos de 3.5"] = decimal
-                        outcome_ids["__oid_Menos de 3.5"] = o.get("id", "")
+                raw       = o.get("odds", 0)
+                otype     = o.get("type", "")
+                line_val  = o.get("line", 0)
+                if not raw or not line_val: continue
+                decimal  = _kambi_odd_to_decimal(raw)
+                line_pts = round(line_val / 1000, 1)
+                if line_pts not in (0.5, 1.5, 2.5, 3.5, 4.5, 5.5):
+                    continue
+                # Sanity check: rechaza si la cuota de Over supera el cap del partido completo
+                if otype == "OT_OVER" and decimal > _FULL_MATCH_OVER_CAP.get(line_pts, 30.0):
+                    logger.debug(
+                        f"O/U {line_pts} Over={decimal} > cap={_FULL_MATCH_OVER_CAP.get(line_pts)} "
+                        f"— probable mercado de equipo, ignorado como total del partido"
+                    )
+                    continue
+                if otype == "OT_OVER":
+                    key = f"Mas de {line_pts}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
+                elif otype == "OT_UNDER":
+                    key = f"Menos de {line_pts}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
+
+        # ── Goles por Equipo (Home / Away Team Goals) ──
+        # Mercados: "Equipo local anota más/menos de X.5 goles" — cuotas típicas 1.40-2.50
+        elif sport == "soccer" and (
+             "home" in en_lower or "away" in en_lower or
+             "local" in es_lower or "visita" in es_lower) and (
+             "goal" in en_lower or "gol" in es_lower):
+            is_home = "home" in en_lower or "local" in es_lower
+            prefix  = "Local" if is_home else "Visita"
+            for o in outcomes:
+                raw      = o.get("odds", 0)
+                otype    = o.get("type", "")
+                line_val = o.get("line", 0)
+                if not raw or not line_val: continue
+                decimal  = _kambi_odd_to_decimal(raw)
+                line_pts = round(line_val / 1000, 1)
+                if line_pts not in (0.5, 1.5, 2.5):
+                    continue
+                if otype == "OT_OVER":
+                    key = f"{prefix}: Mas de {line_pts} Goles"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
+                elif otype == "OT_UNDER":
+                    key = f"{prefix}: Menos de {line_pts} Goles"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
 
         # ── BTTS ──
         elif criterion_en in ["Both Teams to Score"] or \
@@ -255,54 +284,52 @@ def _parse_full_event(home: str, away: str, sport: str,
                     outcome_ids["__oid_Ambos Anotan: No"] = oid
 
         # ── Corners (Total de Tiros de Esquina — partido completo) ──
+        # Usa el campo `line` de Kambi (igual que goles) en lugar de rangos de odds frágiles.
         elif criterion_en.lower() == "total corners" or \
              es_lower == "total de tiros de esquina":
             for o in outcomes:
-                raw   = o.get("odds", 0)
-                otype = o.get("type", "")
-                if not raw: continue
-                decimal = _kambi_odd_to_decimal(raw)
-                # Corners Mas de 9.5: odds tipicas 1.70-2.15
-                if otype == "OT_OVER" and 1.65 <= decimal <= 2.20:
-                    if "Corners Mas de 9.5" not in odds_dict:
-                        odds_dict["Corners Mas de 9.5"] = decimal
-                # Corners Menos de 9.5: odds tipicas 1.65-2.10
-                elif otype == "OT_UNDER" and 1.65 <= decimal <= 2.20:
-                    if "Corners Menos de 9.5" not in odds_dict:
-                        odds_dict["Corners Menos de 9.5"] = decimal
-                # Corners Mas de 10.5: odds tipicas 2.10-3.50
-                elif otype == "OT_OVER" and 2.20 <= decimal <= 3.60:
-                    if "Corners Mas de 10.5" not in odds_dict:
-                        odds_dict["Corners Mas de 10.5"] = decimal
-                # Corners Menos de 10.5
-                elif otype == "OT_UNDER" and 1.25 <= decimal <= 1.65:
-                    if "Corners Menos de 10.5" not in odds_dict:
-                        odds_dict["Corners Menos de 10.5"] = decimal
+                raw      = o.get("odds", 0)
+                otype    = o.get("type", "")
+                line_val = o.get("line", 0)
+                if not raw or not line_val: continue
+                decimal  = _kambi_odd_to_decimal(raw)
+                line_pts = round(line_val / 1000, 1)
+                if line_pts not in (7.5, 8.5, 9.5, 10.5, 11.5, 12.5):
+                    continue
+                if otype == "OT_OVER":
+                    key = f"Corners Mas de {line_pts}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
+                elif otype == "OT_UNDER":
+                    key = f"Corners Menos de {line_pts}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
 
         # ── Tarjetas (Total de tarjetas — partido completo) ──
+        # Ídem: usa campo `line` en lugar de rangos de odds hardcodeados.
         elif criterion_en.lower() == "total cards" or \
              es_lower == "total de tarjetas":
             for o in outcomes:
-                raw   = o.get("odds", 0)
-                otype = o.get("type", "")
-                if not raw: continue
-                decimal = _kambi_odd_to_decimal(raw)
-                # Tarjetas Mas de 3.5: odds tipicas 1.60-2.20
-                if otype == "OT_OVER" and 1.55 <= decimal <= 2.25:
-                    if "Tarjetas Mas de 3.5" not in odds_dict:
-                        odds_dict["Tarjetas Mas de 3.5"] = decimal
-                # Tarjetas Menos de 3.5
-                elif otype == "OT_UNDER" and 1.55 <= decimal <= 2.25:
-                    if "Tarjetas Menos de 3.5" not in odds_dict:
-                        odds_dict["Tarjetas Menos de 3.5"] = decimal
-                # Tarjetas Mas de 4.5: odds tipicas 2.20-3.80
-                elif otype == "OT_OVER" and 2.25 <= decimal <= 4.00:
-                    if "Tarjetas Mas de 4.5" not in odds_dict:
-                        odds_dict["Tarjetas Mas de 4.5"] = decimal
-                # Tarjetas Menos de 4.5
-                elif otype == "OT_UNDER" and 1.20 <= decimal <= 1.55:
-                    if "Tarjetas Menos de 4.5" not in odds_dict:
-                        odds_dict["Tarjetas Menos de 4.5"] = decimal
+                raw      = o.get("odds", 0)
+                otype    = o.get("type", "")
+                line_val = o.get("line", 0)
+                if not raw or not line_val: continue
+                decimal  = _kambi_odd_to_decimal(raw)
+                line_pts = round(line_val / 1000, 1)
+                if line_pts not in (1.5, 2.5, 3.5, 4.5, 5.5, 6.5):
+                    continue
+                if otype == "OT_OVER":
+                    key = f"Tarjetas Mas de {line_pts}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
+                elif otype == "OT_UNDER":
+                    key = f"Tarjetas Menos de {line_pts}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
 
         # ── Resultado Descanso ──
         elif criterion_en in ["Half Time", "Half-time Result"] or \
@@ -314,6 +341,33 @@ def _parse_full_event(home: str, away: str, sport: str,
                 if otype == "OT_ONE":   odds_dict["HT Gana Local"]  = _kambi_odd_to_decimal(raw)
                 elif otype == "OT_CROSS": odds_dict["HT Empate"]    = _kambi_odd_to_decimal(raw)
                 elif otype == "OT_TWO": odds_dict["HT Gana Visita"] = _kambi_odd_to_decimal(raw)
+
+        # ── Asian Handicap ──
+        # Kambi: criterion_en = "Asian Handicap" | line = handicap × 1000
+        # Solo líneas de medio gol (-0.5, +0.5, -1.5, +1.5) para evitar push
+        elif sport == "soccer" and (
+             "asian handicap" in en_lower or "handicap asiatico" in es_lower):
+            for o in outcomes:
+                raw       = o.get("odds", 0)
+                otype     = o.get("type", "")
+                line_val  = o.get("line", 0)
+                if not raw or line_val is None: continue
+                decimal  = _kambi_odd_to_decimal(raw)
+                hcp      = round(line_val / 1000, 1)   # -500 → -0.5
+                # Sólo líneas de medio gol
+                if abs(hcp) % 1 != 0.5:
+                    continue
+                hcp_str  = f"{hcp:+.1f}" if hcp != 0 else "0"
+                if otype == "OT_ONE":   # home covers
+                    key = f"AH Local {hcp_str}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
+                elif otype == "OT_TWO":  # away covers
+                    key = f"AH Visita {hcp_str}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
 
         # ── Basketball / Tennis: Ganador (2-way, sin empate) ──
         elif sport in ("basketball", "tennis") and \
@@ -387,10 +441,11 @@ def _parse_basic_event(event_data: dict) -> dict | None:
 
     start_str = event.get("start", "")
     try:
-        from datetime import datetime
-        start_dt   = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-        match_time = start_dt.strftime("%H:%M")
-        match_date = start_dt.strftime("%Y-%m-%d")
+        # Kambi devuelve timestamps en UTC ("Z") — convertir a hora Colombia (COT = UTC-5)
+        start_utc  = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        start_cot  = start_utc.astimezone(_BOGOTA)
+        match_time = start_cot.strftime("%H:%M")
+        match_date = start_cot.strftime("%Y-%m-%d")
     except Exception:
         match_time = "00:00"
         match_date = ""
@@ -474,37 +529,49 @@ async def get_rushbet_odds_async(sport_filter: str = "soccer",
                 result[sport].append(parsed)
         return result
 
-    for parsed in basic_events:
+    # ── Fetch paralelo de mercados completos ──────────────────────────────────
+    # Máx. 10 requests simultáneos para no sobrecargar Kambi.
+    sem = asyncio.Semaphore(10)
+
+    async def _fetch_event(parsed: dict) -> dict | None:
         event_id = parsed.get("event_id")
-        if not event_id: continue
-
+        if not event_id:
+            return None
         url = KAMBI_BETOFFER.format(event_id=event_id)
-        try:
-            r2     = session.get(url, params=KAMBI_PARAMS_EVENT, timeout=10)
-            if r2.status_code != 200: continue
-            offers = r2.json().get("betOffers", [])
-        except Exception as e:
-            logger.debug(f"Error mercados {parsed['home']} vs {parsed['away']}: {e}")
-            continue
-
-        full = _parse_full_event(
+        async with sem:
+            try:
+                r2 = await asyncio.to_thread(
+                    session.get, url, params=KAMBI_PARAMS_EVENT, timeout=10
+                )
+                if r2.status_code != 200:
+                    return None
+                offers = r2.json().get("betOffers", [])
+            except Exception as e:
+                logger.debug(f"Error mercados {parsed['home']} vs {parsed['away']}: {e}")
+                return None
+        return _parse_full_event(
             home=parsed["home"], away=parsed["away"],
             sport=parsed["sport"], match_time=parsed["time"],
             match_date=parsed["date"], event_id=event_id,
-            offers=offers
+            offers=offers,
         )
-        if not full: continue
 
-        odds    = full.get("odds", {})
-        local   = odds.get("Gana Local", 0)
-        visita  = odds.get("Gana Visita", 0)
-        empate  = odds.get("Empate", 0)
-        sp      = parsed["sport"]
+    all_fulls = await asyncio.gather(*[_fetch_event(p) for p in basic_events],
+                                      return_exceptions=True)
+
+    for parsed, full in zip(basic_events, all_fulls):
+        if not full or isinstance(full, Exception):
+            continue
+
+        odds   = full.get("odds", {})
+        local  = odds.get("Gana Local", 0)
+        visita = odds.get("Gana Visita", 0)
+        empate = odds.get("Empate", 0)
+        sp     = parsed["sport"]
 
         if sp == "soccer":
             valid = (1.20 <= local <= 12.0 and 1.20 <= visita <= 12.0 and empate >= 1.40)
         else:
-            # Basketball y tennis: solo necesitan local y visita (sin empate)
             valid = (1.01 <= local <= 20.0 and 1.01 <= visita <= 20.0)
 
         if valid:
@@ -524,15 +591,16 @@ class RushbetScraper:
 
     def get_odds(self, sport_filter: str = "soccer") -> dict:
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run,
-                                         get_rushbet_odds_async(sport_filter, fetch_full_markets=True))
-                    return future.result(timeout=120)
-            else:
-                return asyncio.run(get_rushbet_odds_async(sport_filter, fetch_full_markets=True))
+            return asyncio.run(get_rushbet_odds_async(sport_filter, fetch_full_markets=True))
+        except RuntimeError:
+            # Ya hay un event loop corriendo (ej. entorno interactivo / Jupyter)
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    get_rushbet_odds_async(sport_filter, fetch_full_markets=True),
+                )
+                return future.result(timeout=120)
         except Exception as e:
             logger.error(f"Error RushbetScraper: {e}")
             return {"soccer": [], "basketball": [], "tennis": []}

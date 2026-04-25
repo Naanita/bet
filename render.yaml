@@ -1,0 +1,60 @@
+services:
+  - type: worker            # proceso background (sin HTTP) — ideal para bots
+    name: quant-bot
+    env: python
+    plan: free
+    region: oregon          # oregon es el más cercano con free tier
+
+    buildCommand: |
+      pip install -r requirements.txt
+      playwright install-deps chromium
+      playwright install chromium
+
+    startCommand: bash startup.sh
+
+    envVars:
+      # ── Telegram ─────────────────────────────────────────────────────────
+      - key: TELEGRAM_TOKEN
+        sync: false          # debes pegarlo manualmente en el dashboard de Render
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: SUPPORT_CHAT_ID
+        sync: false
+      - key: SUPPORT_USERNAME
+        sync: false
+      - key: CHANNEL_ID_BANKERS
+        sync: false
+      - key: CHANNEL_ID_FREE
+        sync: false
+
+      # ── Google Sheets ─────────────────────────────────────────────────────
+      - key: GOOGLE_SHEET_NAME
+        value: DB_BET
+      - key: GOOGLE_CREDENTIALS_BASE64
+        sync: false          # pegar el base64 de credentials.json (ver startup.sh)
+
+      # ── APIs opcionales ───────────────────────────────────────────────────
+      - key: ODDS_API_KEY
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: BALLDONTLIE_API_KEY
+        sync: false
+
+      # ── Datos de pago ─────────────────────────────────────────────────────
+      - key: NEQUI_NUMERO
+        sync: false
+      - key: DAVIPLATA_NUMERO
+        sync: false
+      - key: BANCOLOMBIA_CUENTA
+        sync: false
+      - key: PRECIO_SUSCRIPCION
+        value: "$50.000 COP/mes"
+
+      # ── TikTok (desactivado por defecto) ─────────────────────────────────
+      - key: TIKTOK_ENABLED
+        value: "false"
+
+      # ── Playwright en entorno Linux headless ─────────────────────────────
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/project/.playwright

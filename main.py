@@ -74,6 +74,29 @@ def _build_pick_message(p: dict) -> str:
     stake_str = f"{stake_lvl}/10"
     confidence = p.get("confidence", "")
     source_tag = "Rushbet" if p.get("source") == "rushbet" else "Mercado"
+
+    # ── Mensaje especial para combinadas ──────────────────────────────────────
+    if p.get("is_parlay"):
+        legs = p.get("legs", [])
+        legs_text = ""
+        for i, leg in enumerate(legs, 1):
+            legs_text += (
+                f"  {i}. <b>{leg['home']} vs {leg['away']}</b>\n"
+                f"     📌 {leg['market']} @ <code>{leg['odds']}</code> "
+                f"({leg.get('prob', 0):.1f}%)\n"
+            )
+        return (
+            f"🎰 <b>COMBINADA {p.get('n_legs', len(legs))} PATAS</b> {confidence}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{legs_text}"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 <b>Cuota combinada:</b> <code>{p['odds']}</code>\n"
+            f"✅ <b>Prob. combinada:</b> {p['prob']:.1f}%\n"
+            f"📈 <b>EV:</b> +{p['ev']:.1f}%\n"
+            f"📊 <b>Stake sugerido:</b> {stake_str}\n"
+            f"⚠️ <i>Apuesta combinada: todas las patas deben ganar</i>"
+        )
+
     return (
         f"{p.get('sport','⚽')} <b>NUEVA OPORTUNIDAD</b> {confidence}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -381,6 +404,87 @@ async def _send_monthly_recap(context, now_local):
         if res=="W": mp+=(o-1)*s
         elif res=="L": mp-=s
     await send_monthly_recap(context, month_str, mw, ml, mv, mp)
+
+
+# ─────────────────────────────────────────────
+# TIKTOK CRONS
+# ─────────────────────────────────────────────
+
+async def cron_tiktok_morning(context: ContextTypes.DEFAULT_TYPE):
+    """08:00 COT — Pick reveal videos."""
+    if not config.TIKTOK_ENABLED:
+        return
+    try:
+        from modules.tiktok_scheduler import TikTokScheduler
+        date_str = pd.Timestamp.now(tz=config.TIMEZONE).strftime('%Y-%m-%d')
+        TikTokScheduler().run_morning_picks(date_str)
+        logger.info("[TIKTOK] Morning picks publicados.")
+    except Exception as e:
+        logger.error(f"[TIKTOK] cron_morning error: {e}")
+
+
+async def cron_tiktok_results(context: ContextTypes.DEFAULT_TYPE):
+    """22:00 COT — Result reveal videos."""
+    if not config.TIKTOK_ENABLED:
+        return
+    try:
+        from modules.tiktok_scheduler import TikTokScheduler
+        date_str = pd.Timestamp.now(tz=config.TIMEZONE).strftime('%Y-%m-%d')
+        TikTokScheduler().run_evening_results(date_str)
+        logger.info("[TIKTOK] Results publicados.")
+    except Exception as e:
+        logger.error(f"[TIKTOK] cron_results error: {e}")
+
+
+async def cron_tiktok_recap(context: ContextTypes.DEFAULT_TYPE):
+    """22:30 COT — Daily recap video."""
+    if not config.TIKTOK_ENABLED:
+        return
+    try:
+        from modules.tiktok_scheduler import TikTokScheduler
+        date_str = pd.Timestamp.now(tz=config.TIMEZONE).strftime('%Y-%m-%d')
+        TikTokScheduler().run_daily_recap(date_str)
+        logger.info("[TIKTOK] Recap publicado.")
+    except Exception as e:
+        logger.error(f"[TIKTOK] cron_recap error: {e}")
+
+
+async def tiktok_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /tiktok_stats — estadísticas del día en TikTok."""
+    if str(update.effective_user.id) != config.ADMIN_CHAT_ID:
+        return
+    try:
+        from modules.tiktok_scheduler import TikTokScheduler
+        stats = TikTokScheduler().get_today_stats()
+        recent = TikTokScheduler().get_recent_posts(5)
+        msg = (
+            f"📱 <b>TikTok Stats Hoy</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Publicados: <b>{stats['posted']}</b>\n"
+            f"❌ Fallidos:   <b>{stats['failed']}</b>\n"
+            f"🔧 Habilitado: <b>{'Sí' if config.TIKTOK_ENABLED else 'No'}</b>\n\n"
+            f"<b>Últimos posts:</b>\n"
+        )
+        for p in recent:
+            icon = "✅" if p["status"] == "published" else "❌"
+            msg += f"{icon} {p['video_type']} | {p['posted_at'][:16]}\n"
+        await update.message.reply_text(msg, parse_mode='HTML')
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def tiktok_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /tiktok_test — genera video de prueba sin publicar."""
+    if str(update.effective_user.id) != config.ADMIN_CHAT_ID:
+        return
+    status_msg = await update.message.reply_text("🎬 Generando video de prueba (dry_run)...")
+    try:
+        from modules.tiktok_scheduler import TikTokScheduler
+        date_str = pd.Timestamp.now(tz=config.TIMEZONE).strftime('%Y-%m-%d')
+        TikTokScheduler(dry_run=True).run_morning_picks(date_str)
+        await status_msg.edit_text("✅ Video de prueba generado en data/tiktok_videos/ (sin publicar)")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
 
 
 async def cron_free_channel_nudge(context: ContextTypes.DEFAULT_TYPE):
@@ -947,7 +1051,13 @@ def main():
     app.job_queue.run_repeating(cron_auto_settle,    interval=1800, first=60)
     app.job_queue.run_daily(cron_free_channel_nudge, time(hour=20,minute=0,tzinfo=tz))
 
+    # TikTok automation (solo activo si TIKTOK_ENABLED=true en .env)
+    app.job_queue.run_daily(cron_tiktok_morning, time(hour=8,  minute=0,  tzinfo=tz))
+    app.job_queue.run_daily(cron_tiktok_results, time(hour=22, minute=0,  tzinfo=tz))
+    app.job_queue.run_daily(cron_tiktok_recap,   time(hour=22, minute=30, tzinfo=tz))
+
     print("[*] Jobs: 00:05 | 08:00 | 12:00 | 18:00 | settle cada 30min | 20:00 nudge | 23:59 recap")
+    print(f"[*] TikTok automation: {'ACTIVO' if config.TIKTOK_ENABLED else 'DESACTIVADO'} | 08:00, 22:00, 22:30")
 
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(handle_buy_callback, pattern='^buy_vip$')],
@@ -982,8 +1092,10 @@ def main():
     app.add_handler(CommandHandler("activar",      manual_activate))
     app.add_handler(CommandHandler("configbudget", config_budget))
     app.add_handler(CommandHandler("today",        show_today_cache))
-    app.add_handler(CommandHandler("scan",         manual_scan))
-    app.add_handler(CommandHandler("resend",       resend_picks))
+    app.add_handler(CommandHandler("scan",          manual_scan))
+    app.add_handler(CommandHandler("resend",        resend_picks))
+    app.add_handler(CommandHandler("tiktok_stats",  tiktok_stats))
+    app.add_handler(CommandHandler("tiktok_test",   tiktok_test))
 
     print("[*] Bot en linea.")
     app.run_polling()

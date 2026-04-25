@@ -183,13 +183,33 @@ def get_soccer_probs_from_rushbet(odds: dict, league: str = "DEFAULT") -> dict |
 
     home_lambda, away_lambda = split_lambda(total_lambda, league)
 
+    # apply_home_advantage=False: split_lambda() ya capturó la ventaja local
+    # mediante el ratio histórico de la liga. Activarlo aquí sería double-counting.
     model = AdvancedPoissonModel(
         base_home_xg=home_lambda,
         base_away_xg=away_lambda,
+        apply_home_advantage=False,
     )
+    # get_all_markets() already includes get_team_goals_probs()
     probs = model.get_all_markets()
-    probs["_lambda_home"] = home_lambda
-    probs["_lambda_away"] = away_lambda
+
+    # Corners y tarjetas con promedios de liga (datos sin fbref para ligas no-elite)
+    from modules.advanced_model import CornerModel, CardModel
+    corner_probs = {}
+    corner_model = CornerModel(league=league)
+    corner_probs.update(corner_model.get_over_under_probs(9.5))
+    corner_probs.update(corner_model.get_over_under_probs(10.5))
+    corner_probs.update(corner_model.get_over_under_probs(11.5))
+    probs.update(corner_probs)
+
+    card_probs = {}
+    card_model = CardModel(league=league)
+    card_probs.update(card_model.get_over_under_probs(3.5))
+    card_probs.update(card_model.get_over_under_probs(4.5))
+    probs.update(card_probs)
+
+    probs["_lambda_home"]  = home_lambda
+    probs["_lambda_away"]  = away_lambda
     probs["_total_lambda"] = total_lambda
     return probs
 
@@ -244,13 +264,34 @@ def get_tennis_probs(odds: dict) -> dict | None:
     return remove_vig({"Gana Local": p1, "Gana Visita": p2})
 
 
-def evaluate_picks(game: dict, true_probs: dict, min_ev: float, min_prob: float,
-                   min_odds: float, current_bankroll: float,
-                   sport: str = "soccer") -> list:
+def evaluate_picks(
+    game: dict,
+    true_probs: dict,
+    min_ev: float,
+    min_prob: float,
+    min_odds: float,
+    current_bankroll: float,
+    sport: str = "soccer",
+    resolved_count: int | None = None,
+) -> list:
     """
-    Evalua todos los mercados disponibles de un partido y retorna picks con EV positivo.
+    Evalúa todos los mercados de un partido y retorna picks con EV positivo.
+
+    Pipeline de decisión (orden estricto):
+        1. Filtro de cuota mínima hard (min_odds de config)
+        2. Calibración Bayesiana de la probabilidad (shrinkage × confianza)
+        3. EV sobre la probabilidad CALIBRADA
+        4. Filtro de probabilidad mínima post-calibración
+        5. Kelly Fraccional sobre la probabilidad CALIBRADA
+
+    La calibración actúa como filtro de cuota mínima implícito:
+    con n=20 y p_raw=76%, picks debajo de ~1.72 tienen EV calibrado < 5%
+    y se rechazan sin necesidad de un umbral de cuota explícito.
+
+    Args:
+        resolved_count: picks resueltos en historial. Si None se lee de SQLite.
     """
-    from modules.risk import RiskEngine
+    from modules.risk import RiskEngine, get_rolling_win_rate
 
     home    = game["home"]
     away    = game["away"]
@@ -259,76 +300,173 @@ def evaluate_picks(game: dict, true_probs: dict, min_ev: float, min_prob: float,
     date    = game.get("date", "")
     ev_data = game.get("event_id")
 
-    picks = []
+    # Leer WR y conteo histórico una sola vez por llamada.
+    # min 20 = prior de arranque: aunque el DB esté vacío, la calibración
+    # usa confianza de 20/(20+20)=50%, no 0/(0+20)=0% que bloquearía todo.
+    rolling_wr, db_count = get_rolling_win_rate()
+    n_samples = resolved_count if resolved_count is not None else max(db_count, 20)
+    dynamic_min_odds = min_odds   # el filtro de cuota lo maneja la calibración vía EV
 
     MARKET_ICONS = {
-        "Gana Local":        "🏆",
-        "Gana Visita":       "🏆",
-        "Empate":            "🤝",
-        "Mas de 2.5":        "🎯",
-        "Menos de 2.5":      "🎯",
-        "Mas de 1.5":        "🎯",
-        "Menos de 1.5":      "🎯",
-        "Mas de 3.5":        "🎯",
-        "Menos de 3.5":      "🎯",
-        "Ambos Anotan: Si":  "⚽",
-        "Ambos Anotan: No":  "⚽",
-        "1X":                "2️⃣",
-        "X2":                "2️⃣",
-        "12":                "2️⃣",
-        "Corners Mas de 9.5":  "🚩",
-        "Corners Mas de 10.5": "🚩",
-        "Tarjetas Mas de 3.5": "🟨",
-        "Tarjetas Mas de 4.5": "🟨",
+        "Gana Local":           "🏆",
+        "Gana Visita":          "🏆",
+        "Empate":               "🤝",
+        "Mas de 0.5":           "🎯",
+        "Menos de 0.5":         "🎯",
+        "Mas de 1.5":           "🎯",
+        "Menos de 1.5":         "🎯",
+        "Mas de 2.5":           "🎯",
+        "Menos de 2.5":         "🎯",
+        "Mas de 3.5":           "🎯",
+        "Menos de 3.5":         "🎯",
+        "Mas de 4.5":           "🎯",
+        "Menos de 4.5":         "🎯",
+        "Ambos Anotan: Si":     "⚽",
+        "Ambos Anotan: No":     "⚽",
+        "1X":                   "2️⃣",
+        "X2":                   "2️⃣",
+        "12":                   "2️⃣",
+        "Corners Mas de 9.5":   "🚩",
+        "Corners Menos de 9.5": "🚩",
+        "Corners Mas de 10.5":  "🚩",
+        "Corners Mas de 11.5":  "🚩",
+        "Tarjetas Mas de 3.5":  "🟨",
+        "Tarjetas Menos de 3.5":"🟨",
+        "Tarjetas Mas de 4.5":  "🟨",
+        # Goles por equipo
+        "Local: Mas de 0.5 Goles":   "⚽",
+        "Local: Menos de 0.5 Goles": "⚽",
+        "Local: Mas de 1.5 Goles":   "⚽",
+        "Local: Menos de 1.5 Goles": "⚽",
+        "Local: Mas de 2.5 Goles":   "⚽",
+        "Local: Menos de 2.5 Goles": "⚽",
+        "Visita: Mas de 0.5 Goles":  "⚽",
+        "Visita: Menos de 0.5 Goles":"⚽",
+        "Visita: Mas de 1.5 Goles":  "⚽",
+        "Visita: Menos de 1.5 Goles":"⚽",
+        "Visita: Mas de 2.5 Goles":  "⚽",
+        "Visita: Menos de 2.5 Goles":"⚽",
     }
 
     SPORT_ICONS = {"soccer": "⚽", "basketball": "🏀", "tennis": "🎾"}
-    sport_icon = SPORT_ICONS.get(sport, "⚽")
+    sport_icon  = SPORT_ICONS.get(sport, "⚽")
 
-    for market, true_prob in true_probs.items():
+    def _market_icon(m: str) -> str:
+        if m in MARKET_ICONS:
+            return MARKET_ICONS[m]
+        if m.startswith("AH "):
+            return "🔀"
+        if m.startswith("HT "):
+            return "⏱️"
+        if m.startswith("Local:") or m.startswith("Visita:"):
+            return "⚽"
+        if "Corners" in m:
+            return "🚩"
+        if "Tarjeta" in m:
+            return "🟨"
+        if "Mas de" in m or "Menos de" in m:
+            return "🎯"
+        return sport_icon
+
+    import re as _re
+
+    _GOALS_RE = _re.compile(r'^(Mas|Menos) de (\d+\.?\d*)$')
+
+    def _label_market(m: str) -> str:
+        """
+        Convierte la clave interna al nombre legible para el usuario.
+
+        Regla principal: claves del tipo "Mas de X.5" o "Menos de X.5"
+        (sin prefijo) son siempre mercados de GOLES — se les añade " Goles".
+
+        Ejemplos:
+            "Mas de 0.5"           → "Mas de 0.5 Goles"
+            "Mas de 2.5"           → "Mas de 2.5 Goles"
+            "Menos de 1.5"         → "Menos de 1.5 Goles"
+            "Corners Mas de 9.5"   → (sin cambio — ya lleva prefijo)
+            "Tarjetas Mas de 3.5"  → (sin cambio)
+            "AH Local -0.5"        → "Hándicap Asiático Local -0.5"
+            "HT Gana Local"        → "1er Tiempo - Gana Local"
+        """
+        if _GOALS_RE.match(m):
+            return m + " Goles"
+        if m.startswith("AH Local"):
+            return m.replace("AH Local", "Hándicap Asiático Local")
+        if m.startswith("AH Visita"):
+            return m.replace("AH Visita", "Hándicap Asiático Visita")
+        if m == "HT Gana Local":   return "1er Tiempo - Gana Local"
+        if m == "HT Empate":       return "1er Tiempo - Empate"
+        if m == "HT Gana Visita":  return "1er Tiempo - Gana Visita"
+        # Team goals: "Local: Mas de 1.5 Goles" → "Local anota: Mas de 1.5 Goles"
+        if m.startswith("Local: "):
+            return "Local anota: " + m[len("Local: "):]
+        if m.startswith("Visita: "):
+            return "Visita anota: " + m[len("Visita: "):]
+        return m
+
+    picks = []
+
+    for market, p_raw in true_probs.items():
         if market.startswith("_"):
-            continue
-        if true_prob < min_prob:
             continue
 
         rb_odds = odds.get(market)
-        if not rb_odds or rb_odds < min_odds:
+        if not rb_odds or rb_odds <= 1.0:
             continue
 
-        ev = RiskEngine.expected_value(true_prob, rb_odds)
+        # ── 1. Filtro de cuota mínima (hard floor de config) ──────────
+        if rb_odds < min_odds:
+            continue
+
+        # ── 2. Calibración de probabilidad ────────────────────────────
+        p_cal = RiskEngine.calibrate_probability(p_raw, rb_odds, n_samples=n_samples)
+
+        # ── 3. Filtro de probabilidad mínima (post-calibración) ────────
+        if p_cal < min_prob:
+            continue
+
+        # ── 4. EV sobre probabilidad calibrada ────────────────────────
+        ev = RiskEngine.expected_value(p_cal, rb_odds)
         if ev < min_ev:
             continue
-        # EV >25% casi siempre indica error de modelo (ej. futsal, reservas con lambda mal inferido)
-        if ev > 0.25:
+        # EV >20% post-calibración casi siempre indica datos de entrada corruptos
+        if ev > 0.20:
+            logger.warning(
+                f"EV anómalo descartado: {market} | {home} vs {away} | "
+                f"ev={ev*100:.1f}% odds={rb_odds} p_cal={p_cal*100:.1f}%"
+            )
             continue
 
-        stake = RiskEngine.calculate_kelly_stake(true_prob, rb_odds, current_bankroll)
+        # ── 5. Kelly Fraccional (probabilidad calibrada) ───────────────
+        stake = RiskEngine.calculate_kelly_stake(p_cal, rb_odds, current_bankroll)
         if stake <= 0:
             continue
 
         outcome_id = str(odds.get(f"__oid_{market}", ""))
 
-        if true_prob >= 0.75:   confidence = "🔥 MUY ALTA"
-        elif true_prob >= 0.68: confidence = "✅ ALTA"
-        elif true_prob >= 0.65: confidence = "🟡 MEDIA-ALTA"
-        else:                   confidence = "⚪ MEDIA"
+        if p_cal >= 0.72:   confidence = "🔥 MUY ALTA"
+        elif p_cal >= 0.66: confidence = "✅ ALTA"
+        elif p_cal >= 0.62: confidence = "🟡 MEDIA-ALTA"
+        else:               confidence = "⚪ MEDIA"
 
         lambda_info = ""
         if sport == "soccer":
             lh = true_probs.get("_lambda_home", 0)
             la = true_probs.get("_lambda_away", 0)
             if lh and la:
-                lambda_info = f"Lambda inferido: {lh:.2f}H / {la:.2f}A | "
+                lambda_info = f"λ {lh:.2f}H/{la:.2f}A | "
 
         picks.append({
-            "sport":        sport_icon,
+            "sport":        _market_icon(market),
             "home":         home,
             "away":         away,
             "time":         time,
             "date":         date,
-            "market":       market,
+            "market":       _label_market(market),   # nombre legible para el usuario
+            "market_key":   market,                  # clave interna (para outcome_id lookup)
             "odds":         rb_odds,
-            "prob":         round(true_prob * 100, 1),
+            "prob":         round(p_cal * 100, 1),
+            "prob_raw":     round(p_raw * 100, 1),
             "ev":           round(ev * 100, 1),
             "stake_amount": stake,
             "confidence":   confidence,
@@ -337,9 +475,10 @@ def evaluate_picks(game: dict, true_probs: dict, min_ev: float, min_prob: float,
             "outcome_id":   outcome_id,
             "reason": (
                 f"{lambda_info}"
-                f"Prob real: {true_prob*100:.1f}% | "
-                f"Implicita Rushbet: {(1/rb_odds)*100:.1f}% | "
-                f"EV: +{ev*100:.1f}%"
+                f"Prob modelo: {p_raw*100:.1f}% → calibrada: {p_cal*100:.1f}% | "
+                f"Implícita Rushbet: {(1/rb_odds)*100:.1f}% | "
+                f"EV calibrado: +{ev*100:.1f}% | "
+                f"n={n_samples} picks (WR histórico {rolling_wr*100:.0f}%)"
             ),
         })
 

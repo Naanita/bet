@@ -18,8 +18,15 @@ class AdvancedPoissonModel:
                  away_form_score: float = 0.5,
                  home_injury_impact: float = 1.0,
                  away_injury_impact: float = 1.0,
-                 h2h_data: dict = None):
-
+                 h2h_data: dict = None,
+                 apply_home_advantage: bool = True):
+        """
+        Args:
+            apply_home_advantage: True cuando base_xg viene de datos reales (Understat/FBref).
+                                  False cuando viene de KambiConsensus — en ese caso split_lambda()
+                                  ya incorporó la ventaja de local vía el ratio histórico de la liga,
+                                  y sumar HOME_ADVANTAGE×0.5 sería double-counting.
+        """
         home_form_adj = 1.0 + (home_form_score - 0.5) * 0.30
         away_form_adj = 1.0 + (away_form_score - 0.5) * 0.30
 
@@ -33,20 +40,18 @@ class AdvancedPoissonModel:
             adj_home_xg *= ratio
             adj_away_xg *= ratio
 
-        self.lambda_home = max(0.3, adj_home_xg + self.HOME_ADVANTAGE * 0.5)
+        home_adv = (self.HOME_ADVANTAGE * 0.5) if apply_home_advantage else 0.0
+        self.lambda_home = max(0.3, adj_home_xg + home_adv)
         self.lambda_away = max(0.3, adj_away_xg)
         self.h2h = h2h_data or {}
 
-    def _prob_goals(self, lam: float, n: int) -> float:
-        return poisson.pmf(n, lam)
-
     def _score_matrix(self, max_goals: int = 8) -> np.ndarray:
-        matrix = np.zeros((max_goals + 1, max_goals + 1))
-        for i in range(max_goals + 1):
-            for j in range(max_goals + 1):
-                matrix[i][j] = (self._prob_goals(self.lambda_home, i) *
-                                 self._prob_goals(self.lambda_away, j))
-        return matrix
+        """Matriz de probabilidades de marcador. Vectorizado con np.outer (10-50x más rápido)."""
+        goals = np.arange(max_goals + 1)
+        return np.outer(
+            poisson.pmf(goals, self.lambda_home),
+            poisson.pmf(goals, self.lambda_away),
+        )
 
     def get_1x2_probs(self) -> dict:
         matrix   = self._score_matrix()
@@ -69,12 +74,9 @@ class AdvancedPoissonModel:
         }
 
     def get_over_under_probs(self, line: float = 2.5) -> dict:
-        matrix = self._score_matrix()
-        over   = 0.0
-        for i in range(matrix.shape[0]):
-            for j in range(matrix.shape[1]):
-                if i + j > line:
-                    over += matrix[i][j]
+        matrix  = self._score_matrix()
+        i_idx, j_idx = np.mgrid[0:matrix.shape[0], 0:matrix.shape[1]]
+        over = float(matrix[i_idx + j_idx > line].sum())
         return {
             f"Mas de {line}":   round(over,       4),
             f"Menos de {line}": round(1.0 - over, 4),
@@ -101,11 +103,14 @@ class AdvancedPoissonModel:
                 if diff > 0:   home_cover += p
                 elif diff < 0: away_cover += p
                 else:          push       += p
-        total   = home_cover + away_cover + push
-        hc      = (home_cover + push / 2) / total
-        ac      = (away_cover + push / 2) / total
-        h_label = f"Local ({'+' if handicap > 0 else ''}{handicap})"
-        a_label = f"Visita ({'+' if -handicap > 0 else ''}{-handicap})"
+        total    = home_cover + away_cover + push
+        hc       = (home_cover + push / 2) / total
+        ac       = (away_cover + push / 2) / total
+        # Nombres alineados con el scraper: "AH Local -0.5" / "AH Visita +0.5"
+        h_sign   = f"{handicap:+.1f}"
+        a_sign   = f"{-handicap:+.1f}"
+        h_label  = f"AH Local {h_sign}"
+        a_label  = f"AH Visita {a_sign}"
         return {h_label: round(hc, 4), a_label: round(ac, 4)}
 
     def get_halftime_probs(self) -> dict:
@@ -120,17 +125,33 @@ class AdvancedPoissonModel:
             "HT Gana Visita": p["Gana Visita"],
         }
 
+    def get_team_goals_probs(self) -> dict:
+        """P(equipo anota >= n goles) usando Poisson individual por equipo."""
+        result = {}
+        for prefix, lam in [("Local", self.lambda_home), ("Visita", self.lambda_away)]:
+            for line in (0.5, 1.5, 2.5):
+                p_over  = 1.0 - poisson.cdf(int(line), lam)
+                p_under = poisson.cdf(int(line), lam)
+                result[f"{prefix}: Mas de {line} Goles"]   = round(p_over,  4)
+                result[f"{prefix}: Menos de {line} Goles"] = round(p_under, 4)
+        return result
+
     def get_all_markets(self) -> dict:
         markets = {}
         markets.update(self.get_1x2_probs())
         markets.update(self.get_double_chance_probs())
+        markets.update(self.get_over_under_probs(0.5))
         markets.update(self.get_over_under_probs(1.5))
         markets.update(self.get_over_under_probs(2.5))
         markets.update(self.get_over_under_probs(3.5))
+        markets.update(self.get_over_under_probs(4.5))
         markets.update(self.get_btts_prob())
         markets.update(self.get_asian_handicap_probs(-0.5))
-        markets.update(self.get_asian_handicap_probs(0.5))
+        markets.update(self.get_asian_handicap_probs(+0.5))
+        markets.update(self.get_asian_handicap_probs(-1.5))
+        markets.update(self.get_asian_handicap_probs(+1.5))
         markets.update(self.get_halftime_probs())
+        markets.update(self.get_team_goals_probs())
         return markets
 
 

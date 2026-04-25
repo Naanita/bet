@@ -39,9 +39,19 @@ class GoogleSheetsManager:
             "https://www.googleapis.com/auth/drive",
         ]
         try:
-            self.credentials = Credentials.from_service_account_file(
-                "credentials.json", scopes=scopes
-            )
+            # Soporte para Render/Cloud: credenciales en variable de entorno Base64
+            import os, json as _json
+            _creds_b64 = os.getenv("GOOGLE_CREDENTIALS_BASE64", "")
+            if _creds_b64:
+                import base64, tempfile
+                _decoded   = base64.b64decode(_creds_b64).decode("utf-8")
+                _info      = _json.loads(_decoded)
+                self.credentials = Credentials.from_service_account_info(_info, scopes=scopes)
+            else:
+                # Fallback: archivo local credentials.json (desarrollo)
+                self.credentials = Credentials.from_service_account_file(
+                    "credentials.json", scopes=scopes
+                )
             self.client = gspread.authorize(self.credentials)
             self.sheet  = self.client.open(config.GOOGLE_SHEET_NAME)
             logger.info(f"Conectado a Google Sheets: {config.GOOGLE_SHEET_NAME}")

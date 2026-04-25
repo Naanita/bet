@@ -4,9 +4,27 @@
 
 import asyncio
 import logging
+import re as _re
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# ── Filtros de partidos reales (fuera de la función para no recrearlos en cada llamada) ──
+_EXCLUDE_TAGS = (
+    "(f)", "(b)", "futsal", "beach", "sala", "indoor",
+    "e-sports", "esports", "virtual", "cyber",
+)
+_ESPORTS_RE = _re.compile(r"\([A-Za-z0-9_]+\)")  # tags como (Rodja), (borees)
+
+
+def _is_real_match(g: dict) -> bool:
+    home_l = g["home"].lower()
+    away_l = g["away"].lower()
+    if any(tag in home_l or tag in away_l for tag in _EXCLUDE_TAGS):
+        return False
+    if _ESPORTS_RE.search(g["home"]) or _ESPORTS_RE.search(g["away"]):
+        return False
+    return True
 
 
 async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
@@ -31,9 +49,14 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
         evaluate_picks,
         LEAGUE_GOAL_AVERAGES,
     )
-    from modules.risk import RiskEngine
+    from modules.risk import RiskEngine, get_rolling_win_rate
+    from modules.rushbet_scraper import _match_rushbet_game
 
     opportunities = []
+
+    # Leer historial una sola vez para toda la ejecución del pipeline
+    _rolling_wr, _db_count = get_rolling_win_rate()
+    _n_samples = max(_db_count, 20)
 
     # ─────────────────────────────────────────────
     # 1. Scraping Rushbet — TODOS los deportes
@@ -111,7 +134,6 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
             # ELO Banker
             elo_prob = data_engine.get_elo_prob(home, away)
             if elo_prob > 0.75:
-                from modules.rushbet_scraper import _match_rushbet_game
                 rb_game = _match_rushbet_game(home, away, soccer_games)
                 if rb_game:
                     rb_local = rb_game.get("odds", {}).get("Gana Local", 0)
@@ -130,7 +152,6 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
                             })
 
             # Buscar en Rushbet y evaluar
-            from modules.rushbet_scraper import _match_rushbet_game
             rb_game = _match_rushbet_game(home, away, soccer_games)
             if rb_game:
                 picks = evaluate_picks(
@@ -141,6 +162,7 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
                     min_odds=config.MIN_ODDS,
                     current_bankroll=current_bankroll,
                     sport="soccer",
+                    resolved_count=_n_samples,
                 )
                 opportunities.extend(picks)
                 elite_pairs.add(f"{home} vs {away}")
@@ -152,23 +174,6 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
     # 3. Futbol — resto de ligas (KambiConsensus)
     # ─────────────────────────────────────────────
     logger.info(f"Evaluando futbol Rushbet ({len(soccer_games)} partidos)...")
-    # Excluir futsal, playa, virtual/esports, reservas con tag especiales
-    _EXCLUDE_TAGS = (
-        "(f)", "(b)", "futsal", "beach", "sala", "indoor",
-        "e-sports", "esports", "virtual", "cyber",
-        # Esports: nombres entre parentesis como (Rodja), (borees), (DaVa), etc.
-    )
-    import re as _re
-    _ESPORTS_RE = _re.compile(r"\([A-Za-z0-9_]+\)")  # detecta tags como (Rodja), (borees)
-
-    def _is_real_match(g):
-        home_l = g["home"].lower(); away_l = g["away"].lower()
-        if any(tag in home_l or tag in away_l for tag in _EXCLUDE_TAGS):
-            return False
-        if _ESPORTS_RE.search(g["home"]) or _ESPORTS_RE.search(g["away"]):
-            return False
-        return True
-
     today_soccer = [
         g for g in soccer_games
         if g.get("date") == target_date
@@ -192,116 +197,63 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
         picks = evaluate_picks(
             game=game,
             true_probs=true_probs,
-            min_ev=ev_min,
+            min_ev=config.MIN_EV_THRESHOLD,
             min_prob=config.MIN_PROBABILITY,
             min_odds=config.MIN_ODDS,
             current_bankroll=current_bankroll,
             sport="soccer",
+            resolved_count=_n_samples,
         )
         opportunities.extend(picks)
 
     # ─────────────────────────────────────────────
-    # 4. Basketball
+    # 4. Basketball — vig removal sobre cuotas Rushbet
     # ─────────────────────────────────────────────
     today_bball = [g for g in basketball_games if g.get("date") == target_date]
     logger.info(f"Basketball hoy: {len(today_bball)}")
 
-    # Intentar enriquecer con Ball Dont Lie
-    bdl_predictions = {}
-    try:
-        if config.BALLDONTLIE_API_KEY:
-            from modules.balldontlie_engine import BallDontLieEngine
-            bdl = BallDontLieEngine(api_key=config.BALLDONTLIE_API_KEY)
-            for g in today_bball:
-                pred = await asyncio.to_thread(bdl.predict_game, g["home"], g["away"])
-                if pred:
-                    key = f"{g['home']} vs {g['away']}"
-                    bdl_predictions[key] = pred
-                    logger.debug(f"BDL: {key} -> {pred['home_win_prob']:.2f} / {pred['away_win_prob']:.2f}")
-    except Exception as e:
-        logger.debug(f"Ball Dont Lie no disponible: {e}")
-
     for game in today_bball:
-        odds = game.get("odds", {})
-        key  = f"{game['home']} vs {game['away']}"
-
-        # Probabilidades base desde Rushbet (vig removal)
-        rb_probs = get_basketball_probs(odds)
-        if not rb_probs:
+        true_probs = get_basketball_probs(game.get("odds", {}))
+        if not true_probs:
             continue
-
-        # Si tenemos BDL, mezclar: 60% modelo estadistico, 40% mercado
-        bdl_pred = bdl_predictions.get(key)
-        if bdl_pred:
-            true_probs = {
-                "Gana Local":  round(bdl_pred["home_win_prob"] * 0.6 + rb_probs.get("Gana Local", 0.5) * 0.4, 4),
-                "Gana Visita": round(bdl_pred["away_win_prob"] * 0.6 + rb_probs.get("Gana Visita", 0.5) * 0.4, 4),
-            }
-            # Agregar over/under si los teniamos
-            true_probs.update({k: v for k, v in rb_probs.items()
-                               if k not in ("Gana Local", "Gana Visita")})
-        else:
-            # Sin BDL: EV del mercado puro sera ~0, subir umbral para ser conservadores
-            # Solo publicar si hay inconsistencia clara entre mercados
-            true_probs = rb_probs
-
         picks = evaluate_picks(
             game=game,
             true_probs=true_probs,
-            min_ev=0.04,  # 4% minimo para basketball sin modelo externo
-            min_prob=0.60 if bdl_pred else 0.68,
+            min_ev=config.MIN_EV_THRESHOLD,
+            min_prob=config.MIN_PROBABILITY,
             min_odds=config.MIN_ODDS,
             current_bankroll=current_bankroll,
             sport="basketball",
+            resolved_count=_n_samples,
         )
         opportunities.extend(picks)
 
     # ─────────────────────────────────────────────
-    # 5. Tenis
+    # 5. Tenis — vig removal sobre cuotas Rushbet
     # ─────────────────────────────────────────────
     today_tennis = [g for g in tennis_games if g.get("date") == target_date]
     logger.info(f"Tenis hoy: {len(today_tennis)}")
 
     for game in today_tennis:
-        odds       = game.get("odds", {})
-        true_probs = get_tennis_probs(odds)
+        true_probs = get_tennis_probs(game.get("odds", {}))
         if not true_probs:
             continue
-
-        # Para tenis sin modelo externo, EV del vig removal sera ~0
-        # Solo publicar si hay asimetria clara en las probabilidades
-        # (favorito claro con EV >= 5%)
         picks = evaluate_picks(
             game=game,
             true_probs=true_probs,
-            min_ev=0.05,
-            min_prob=0.65,
+            min_ev=config.MIN_EV_THRESHOLD,
+            min_prob=config.MIN_PROBABILITY,
             min_odds=config.MIN_ODDS,
             current_bankroll=current_bankroll,
             sport="tennis",
+            resolved_count=_n_samples,
         )
         opportunities.extend(picks)
 
     # ─────────────────────────────────────────────
-    # 6. NBA (Ball Dont Lie — picks directos)
+    # 7. Deduplicar y ordenar (múltiples mercados por partido)
     # ─────────────────────────────────────────────
-    try:
-        from modules.balldontlie_engine import BallDontLieEngine
-        bdl = BallDontLieEngine(api_key=config.BALLDONTLIE_API_KEY)
-        nba_picks = await asyncio.to_thread(
-            bdl.get_nba_picks, current_bankroll,
-            config.MIN_PROBABILITY, config.MIN_EV_THRESHOLD,
-        )
-        if nba_picks:
-            logger.info(f"NBA picks (BDL): {len(nba_picks)}")
-            opportunities.extend(nba_picks)
-    except Exception as e:
-        logger.debug(f"BDL picks no disponibles: {e}")
-
-    # ─────────────────────────────────────────────
-    # 7. Deduplicar, 1 pick por partido y ordenar
-    # ─────────────────────────────────────────────
-    # Primero deduplicar por home+away+market
+    # Deduplicar por home+away+market (un pick por mercado por partido)
     seen   = set()
     unique = []
     for p in opportunities:
@@ -310,24 +262,40 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
             seen.add(key)
             unique.append(p)
 
-    # Ordenar por EV desc para que el mejor market quede primero
+    # Ordenar por EV desc
     unique.sort(key=lambda x: x["ev"], reverse=True)
 
-    # Conservar solo el pick de mayor EV por partido (mismo home+away)
-    best_per_game: dict = {}
+    # Limitar a máximo 3 mercados por partido (evita sobrecargar con picks del mismo juego)
+    markets_per_game: dict = {}
+    filtered = []
     for p in unique:
         game_key = f"{p['home']} vs {p['away']}"
-        if game_key not in best_per_game:
-            best_per_game[game_key] = p
-    unique = list(best_per_game.values())
-    unique.sort(key=lambda x: x["ev"], reverse=True)
+        count = markets_per_game.get(game_key, 0)
+        if count < 3:
+            markets_per_game[game_key] = count + 1
+            filtered.append(p)
+    unique = filtered
 
-    # Limitar a los TOP 20 picks del dia (los de mayor EV)
-    MAX_DAILY_PICKS = 20
+    # Limitar a los TOP 40 picks individuales del dia (mayor EV)
+    MAX_DAILY_PICKS = 40
     unique = unique[:MAX_DAILY_PICKS]
+
+    # ─────────────────────────────────────────────
+    # 6. Apuestas combinadas (parlays / acumuladores)
+    # ─────────────────────────────────────────────
+    try:
+        from modules.parlay_engine import generate_parlays
+        parlays = generate_parlays(unique, current_bankroll=current_bankroll)
+        if parlays:
+            logger.info(f"Combinadas generadas: {len(parlays)}")
+            unique = unique + parlays
+    except Exception as e:
+        logger.warning(f"Parlay engine falló: {e}")
+
     logger.info(
         f"Pipeline v5 — Total picks: {len(unique)} | "
-        f"Futbol: {sum(1 for p in unique if p.get('sport') in ('⚽','💎','🎯','🌍','2️⃣','🟨','🚩'))} | "
+        f"Individuales: {sum(1 for p in unique if not p.get('is_parlay'))} | "
+        f"Combinadas: {sum(1 for p in unique if p.get('is_parlay'))} | "
         f"Basketball: {sum(1 for p in unique if p.get('sport') == '🏀')} | "
         f"Tenis: {sum(1 for p in unique if p.get('sport') == '🎾')}"
     )

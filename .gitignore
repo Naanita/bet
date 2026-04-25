@@ -21,7 +21,6 @@ __pycache__/
 # ========================
 credentials.json
 credentials*.json
-config.py
 *.key
 *.pem
 secrets.*

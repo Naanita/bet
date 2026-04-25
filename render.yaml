@@ -1,9 +1,9 @@
 services:
-  - type: worker            # proceso background (sin HTTP) — ideal para bots
+  - type: web               # web service — único tipo disponible en plan free
     name: quant-bot
     env: python
     plan: free
-    region: oregon          # oregon es el más cercano con free tier
+    region: oregon
 
     buildCommand: |
       pip install -r requirements.txt
@@ -11,6 +11,8 @@ services:
       playwright install chromium
 
     startCommand: bash startup.sh
+
+    healthCheckPath: /health   # Render verifica que el proceso sigue vivo
 
     envVars:
       # ── Telegram ─────────────────────────────────────────────────────────

@@ -1028,6 +1028,36 @@ async def ask_receipt_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # ─────────────────────────────────────────────
 
+def _start_health_server():
+    """
+    Servidor HTTP mínimo requerido por Render (plan free solo acepta web services).
+    Corre en un hilo daemon — no bloquea el bot de Telegram.
+    GET /health → 200 OK  (Render usa esto para saber que el proceso vive)
+    GET /        → 200 OK
+    """
+    import os
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+
+    port = int(os.environ.get("PORT", 8080))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *args):
+            pass   # silenciar logs HTTP en consola
+
+    def _serve():
+        HTTPServer(("0.0.0.0", port), _Handler).serve_forever()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    logger.info(f"Health server escuchando en puerto {port}")
+
+
 def main():
     import sys, io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -1039,6 +1069,8 @@ def main():
     print(f"[*] EV minimo:      {config.MIN_EV_THRESHOLD*100:.0f}%")
     print(f"[*] Prob minima:    {config.MIN_PROBABILITY*100:.0f}%")
     print("=========================================")
+
+    _start_health_server()
 
     app = Application.builder().token(config.TELEGRAM_TOKEN).build()
     tz  = pytz.timezone(config.TIMEZONE)

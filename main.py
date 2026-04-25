@@ -1047,6 +1047,10 @@ def _start_health_server():
             self.end_headers()
             self.wfile.write(b"OK")
 
+        def do_HEAD(self):   # UptimeRobot usa HEAD por defecto
+            self.send_response(200)
+            self.end_headers()
+
         def log_message(self, *args):
             pass   # silenciar logs HTTP en consola
 

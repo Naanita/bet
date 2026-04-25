@@ -7,8 +7,8 @@ services:
 
     buildCommand: |
       pip install -r requirements.txt
-      playwright install-deps chromium
-      playwright install chromium
+      python -m playwright install-deps chromium
+      python -m playwright install chromium
 
     startCommand: bash startup.sh
 

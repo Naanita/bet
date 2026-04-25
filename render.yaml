@@ -58,6 +58,10 @@ services:
       - key: TIKTOK_ENABLED
         value: "false"
 
+      # ── Versión de Python ────────────────────────────────────────────────
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
       # ── Playwright en entorno Linux headless ─────────────────────────────
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: /opt/render/project/.playwright

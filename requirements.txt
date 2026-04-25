@@ -7,7 +7,7 @@ python-telegram-bot[job-queue]==21.5
 # ── APIs de datos ──
 requests==2.31.0
 understatapi==0.7.1
-soccerdata==1.9.0
+soccerdata>=1.9.0
 
 # ── Análisis de datos ──
 pandas==2.1.4

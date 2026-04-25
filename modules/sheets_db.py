@@ -219,6 +219,13 @@ class GoogleSheetsManager:
 
     def save_daily_picks(self, picks: list, target_date: str):
         try:
+            from modules.tracking import log_bet, init_db
+            init_db()
+        except Exception as e:
+            logger.warning(f"tracking init falló: {e}")
+            log_bet = None
+
+        try:
             ws_hoy  = self._ws("Picks_Hoy")
             ws_hist = self._ws("Historial")
             existing = ws_hoy.get_all_records()
@@ -231,9 +238,9 @@ class GoogleSheetsManager:
                 pick_id   = self._generate_id(target_date, next_idx + i)
                 sport_lbl = self._sport_label(p.get("sport", ""))
                 partido   = f"{p['home']} vs {p['away']}"
-                max_stake = config.BANKROLL_INICIAL * config.MAX_STAKE_PERCENT
-                stake_lvl = max(1, min(10, int(round(
-                    (p.get('stake_amount', 0) / max_stake) * 10
+                # Usar stake_level ya calculado por evaluate_picks, fallback al cálculo anterior
+                stake_lvl = p.get("stake_level") or max(1, min(10, int(round(
+                    (p.get('stake_amount', 0) / (config.BANKROLL_INICIAL * config.MAX_STAKE_PERCENT)) * 10
                 ))))
                 stake_str  = f"{stake_lvl}/10"
                 cuota_rb   = p.get("odds", 0)
@@ -265,10 +272,27 @@ class GoogleSheetsManager:
                     "", "", p.get("reason",""), fuente,
                 ])
 
+                # ── Tracking SQLite ───────────────────────────────────────
+                if log_bet and not p.get("is_parlay"):
+                    try:
+                        log_bet(
+                            date=target_date,
+                            fixture=partido,
+                            market=p.get("market", ""),
+                            model_prob=round(float(p.get("prob", 0)) / 100, 4),
+                            odds_taken=float(p.get("odds", 0)),
+                            stake=float(p.get("stake_amount", 0)),
+                            ev_expected=round(float(p.get("ev", 0)) / 100, 4),
+                            stake_level=stake_lvl,
+                            event_id=str(p.get("event_id", "")),
+                        )
+                    except Exception as e:
+                        logger.warning(f"tracking log_bet falló para {partido}: {e}")
+
             if rows_hoy:
                 ws_hoy.append_rows(rows_hoy)
                 ws_hist.append_rows(rows_hist)
-                logger.info(f"{len(rows_hoy)} picks guardados en Picks_Hoy e Historial")
+                logger.info(f"{len(rows_hoy)} picks guardados en Picks_Hoy, Historial y SQLite")
 
         except Exception as e:
             logger.error(f"Error save_daily_picks: {e}")
@@ -298,6 +322,9 @@ class GoogleSheetsManager:
 
             row_data = ws_hoy.row_values(row_index)
             pick_id  = row_data[0] if row_data else None
+            # row_data indices (0-based): Partido=4, Mercado=5
+            partido  = row_data[4] if len(row_data) > 4 else ""
+            mercado  = row_data[5] if len(row_data) > 5 else ""
 
             if pick_id:
                 ws_hist   = self._ws("Historial")
@@ -314,6 +341,15 @@ class GoogleSheetsManager:
                         except Exception:
                             pass
                         break
+
+            # ── Tracking SQLite ───────────────────────────────────────────
+            if partido and mercado:
+                try:
+                    from modules.tracking import settle_bet
+                    result_int = 1 if result == "W" else 0
+                    settle_bet(fixture=partido, market=mercado, result=result_int)
+                except Exception as e:
+                    logger.warning(f"tracking settle_bet falló {partido}/{mercado}: {e}")
 
         except Exception as e:
             logger.error(f"Error update_bet_result fila {row_index}: {e}")

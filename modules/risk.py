@@ -206,6 +206,18 @@ class RiskEngine:
         return round(bankroll * adj_kelly, 2)
 
     @staticmethod
+    def stake_level(stake_amount: float, bankroll: float,
+                    max_stake_pct: float = 0.05) -> int:
+        """
+        Mapea el stake de Kelly a una escala 1-10 para display.
+        1 = edge mínimo aceptable, 10 = stake máximo permitido.
+        """
+        max_stake = bankroll * max_stake_pct
+        if max_stake <= 0 or stake_amount <= 0:
+            return 1
+        return max(1, min(10, round((stake_amount / max_stake) * 10)))
+
+    @staticmethod
     def evaluate_correlated_parlay(
         home_xg: float, away_xg: float,
         home_team: str, away_team: str,

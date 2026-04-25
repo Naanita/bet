@@ -69,8 +69,9 @@ def determine_winner(market: str, home_score: int, away_score: int):
 
 
 def _build_pick_message(p: dict) -> str:
-    max_stake = config.BANKROLL_INICIAL * config.MAX_STAKE_PERCENT
-    stake_lvl = max(1, min(10, int(round((p.get('stake_amount', 0) / max_stake) * 10))))
+    stake_lvl = p.get("stake_level") or RiskEngine.stake_level(
+        p.get("stake_amount", 0), config.BANKROLL_INICIAL, config.MAX_STAKE_PERCENT
+    )
     stake_str = f"{stake_lvl}/10"
     confidence = p.get("confidence", "")
     source_tag = "Rushbet" if p.get("source") == "rushbet" else "Mercado"
@@ -115,8 +116,9 @@ def _build_pick_message(p: dict) -> str:
 def _generate_pick_img(pick: dict) -> bytes | None:
     def _gen():
         try:
-            max_stake = config.BANKROLL_INICIAL * config.MAX_STAKE_PERCENT
-            stake_lvl = max(1, min(10, int(round((pick.get('stake_amount', 0) / max_stake) * 10))))
+            stake_lvl = pick.get("stake_level") or RiskEngine.stake_level(
+                pick.get("stake_amount", 0), config.BANKROLL_INICIAL, config.MAX_STAKE_PERCENT
+            )
             return generate_pick_image(
                 home=pick.get("home", ""),
                 away=pick.get("away", ""),
@@ -238,6 +240,42 @@ async def cron_auto_settle(context: ContextTypes.DEFAULT_TYPE):
     api        = OddsAPI()
     scores_map = api.get_scores(days_from=3)
     updates    = 0
+
+    # ── Captura de Closing Line Value ────────────────────────────────────
+    # Para cada apuesta pendiente intentamos capturar las cuotas actuales
+    # de Rushbet como proxy de closing odds (antes de que el mercado cierre).
+    try:
+        from modules.tracking import update_closing_odds, get_open_bets
+        open_bets = get_open_bets(days_back=3)
+        if open_bets:
+            from modules.rushbet_scraper import get_rushbet_odds_async
+            rushbet_snapshot = await get_rushbet_odds_async(
+                sport_filter=None, fetch_full_markets=False
+            )
+            all_games = (
+                rushbet_snapshot.get("soccer", []) +
+                rushbet_snapshot.get("basketball", []) +
+                rushbet_snapshot.get("tennis", [])
+            )
+            # Indexar por fixture normalizado para búsqueda rápida
+            odds_index: dict = {}
+            for g in all_games:
+                key = f"{g['home']} vs {g['away']}"
+                odds_index[key] = g.get("odds", {})
+
+            clv_captured = 0
+            for bet in open_bets:
+                fixture = bet.get("fixture", "")
+                market  = bet.get("market", "")
+                if fixture in odds_index and market in odds_index[fixture]:
+                    current_odds = odds_index[fixture][market]
+                    if current_odds and current_odds > 1.0:
+                        update_closing_odds(fixture, market, current_odds)
+                        clv_captured += 1
+            if clv_captured:
+                logger.info(f"[CLV] {clv_captured} closing odds capturados")
+    except Exception as e:
+        logger.warning(f"[CLV] captura falló (no crítico): {e}")
 
     for bet in pending:
         match_name = bet['data'].get('Partido')
@@ -1065,6 +1103,15 @@ def _start_health_server():
 def main():
     import sys, io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+    # Inicializar tracking SQLite al arrancar (crea tabla + migra columnas si hace falta)
+    try:
+        from modules.tracking import init_db
+        init_db()
+        logger.info("[DB] SQLite tracking inicializado.")
+    except Exception as e:
+        logger.warning(f"[DB] tracking init falló: {e}")
+
     print("=========================================")
     print(f"[BOT] {config.BOT_NAME} v5.0")
     print(f"[*] Admin:          {config.ADMIN_CHAT_ID}")

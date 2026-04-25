@@ -442,6 +442,8 @@ def evaluate_picks(
         if stake <= 0:
             continue
 
+        import config as _cfg
+        stake_lvl  = RiskEngine.stake_level(stake, current_bankroll, _cfg.MAX_STAKE_PERCENT)
         outcome_id = str(odds.get(f"__oid_{market}", ""))
 
         if p_cal >= 0.72:   confidence = "🔥 MUY ALTA"
@@ -462,13 +464,14 @@ def evaluate_picks(
             "away":         away,
             "time":         time,
             "date":         date,
-            "market":       _label_market(market),   # nombre legible para el usuario
-            "market_key":   market,                  # clave interna (para outcome_id lookup)
+            "market":       _label_market(market),
+            "market_key":   market,
             "odds":         rb_odds,
             "prob":         round(p_cal * 100, 1),
             "prob_raw":     round(p_raw * 100, 1),
             "ev":           round(ev * 100, 1),
             "stake_amount": stake,
+            "stake_level":  stake_lvl,
             "confidence":   confidence,
             "source":       "rushbet",
             "event_id":     ev_data,

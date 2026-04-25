@@ -83,8 +83,8 @@ class AdvancedPoissonModel:
         }
 
     def get_btts_prob(self) -> dict:
-        p_home = 1.0 - self._prob_goals(self.lambda_home, 0)
-        p_away = 1.0 - self._prob_goals(self.lambda_away, 0)
+        p_home = 1.0 - float(poisson.pmf(0, self.lambda_home))
+        p_away = 1.0 - float(poisson.pmf(0, self.lambda_away))
         yes    = p_home * p_away
         return {
             "Ambos Anotan: Si": round(yes,       4),

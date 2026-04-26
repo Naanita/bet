@@ -27,6 +27,15 @@ def _is_real_match(g: dict) -> bool:
     return True
 
 
+def _match_is_future(game: dict, now_local: "pd.Timestamp", tz_str: str, buffer_min: int = 30) -> bool:
+    """True si el partido aún no ha comenzado (con buffer en minutos)."""
+    try:
+        kickoff = pd.Timestamp(f"{game['date']} {game.get('time', '00:00')}", tz=tz_str)
+        return kickoff > now_local + pd.Timedelta(minutes=buffer_min)
+    except Exception:
+        return True
+
+
 async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
     """
     Pipeline v5 — Rushbet-only, multi-deporte.
@@ -41,6 +50,8 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
     7. Ordenar por EV desc
     """
     import config
+    now_local = pd.Timestamp.now(tz=config.TIMEZONE)
+
     from modules.rushbet_scraper import get_rushbet_odds_async
     from modules.kambi_consensus import (
         get_soccer_probs_from_rushbet,
@@ -95,7 +106,10 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
             pd.to_datetime(schedule[date_col], utc=True).dt.tz_convert(config.TIMEZONE)
         )
         schedule['date_str'] = schedule['match_time_local'].dt.strftime('%Y-%m-%d')
-        elite_today = schedule[schedule['date_str'] == target_date]
+        elite_today = schedule[
+            (schedule['date_str'] == target_date) &
+            (schedule['match_time_local'] > now_local + pd.Timedelta(minutes=30))
+        ]
 
         logger.info(f"Partidos elite Understat ({target_date}): {len(elite_today)}")
 
@@ -179,6 +193,7 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
         if g.get("date") == target_date
         and f"{g['home']} vs {g['away']}" not in elite_pairs
         and _is_real_match(g)
+        and _match_is_future(g, now_local, config.TIMEZONE)
     ]
     logger.info(f"  Futbol hoy (no elite): {len(today_soccer)}")
 
@@ -209,7 +224,11 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
     # ─────────────────────────────────────────────
     # 4. Basketball — vig removal sobre cuotas Rushbet
     # ─────────────────────────────────────────────
-    today_bball = [g for g in basketball_games if g.get("date") == target_date]
+    today_bball = [
+        g for g in basketball_games
+        if g.get("date") == target_date
+        and _match_is_future(g, now_local, config.TIMEZONE)
+    ]
     logger.info(f"Basketball hoy: {len(today_bball)}")
 
     for game in today_bball:
@@ -231,7 +250,11 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
     # ─────────────────────────────────────────────
     # 5. Tenis — vig removal sobre cuotas Rushbet
     # ─────────────────────────────────────────────
-    today_tennis = [g for g in tennis_games if g.get("date") == target_date]
+    today_tennis = [
+        g for g in tennis_games
+        if g.get("date") == target_date
+        and _match_is_future(g, now_local, config.TIMEZONE)
+    ]
     logger.info(f"Tenis hoy: {len(today_tennis)}")
 
     for game in today_tennis:

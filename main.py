@@ -199,11 +199,16 @@ async def _distribute_picks(context, picks: list):
 
 async def cron_market_scanner(context: ContextTypes.DEFAULT_TYPE):
     now_local = pd.Timestamp.now(tz=config.TIMEZONE)
-    today_str = now_local.strftime('%Y-%m-%d')
-    logger.info(f"[CRON] Escaner ({now_local.strftime('%H:%M')})...")
+    # Escaneo de las 18:00+ → pre-analizar partidos de mañana
+    if now_local.hour >= 18:
+        scan_dt = now_local + pd.Timedelta(days=1)
+    else:
+        scan_dt = now_local
+    target_date = scan_dt.strftime('%Y-%m-%d')
+    logger.info(f"[CRON] Escaner ({now_local.strftime('%H:%M')}) → analizando {target_date}...")
 
-    live_picks     = await run_quant_pipeline(today_str, config.BANKROLL_INICIAL)
-    existing_picks = sheets_db.get_existing_picks(today_str)
+    live_picks     = await run_quant_pipeline(target_date, config.BANKROLL_INICIAL)
+    existing_picks = sheets_db.get_existing_picks(target_date)
     new_picks      = [
         p for p in live_picks
         if f"{p['home']} vs {p['away']}_{p['market']}" not in existing_picks
@@ -214,7 +219,7 @@ async def cron_market_scanner(context: ContextTypes.DEFAULT_TYPE):
         # Notificar solo en el escaneo de las 08:00
         if now_local.hour == 8:
             msg_no_picks = (
-                f"📡 <b>Escaneo completado — {today_str}</b>\n\n"
+                f"📡 <b>Escaneo completado — {target_date}</b>\n\n"
                 f"🔍 No se encontraron apuestas con valor esperado positivo hoy.\n\n"
                 f"<i>El sistema seguirá monitoreando durante el día.</i>"
             )
@@ -227,7 +232,7 @@ async def cron_market_scanner(context: ContextTypes.DEFAULT_TYPE):
                         logger.error(f"Error no-picks: {e}")
         return
 
-    sheets_db.save_daily_picks(new_picks, today_str)
+    sheets_db.save_daily_picks(new_picks, target_date)
     await _distribute_picks(context, new_picks)
 
 
@@ -374,6 +379,9 @@ async def _check_send_daily_recap(context):
 
 
 async def daily_recap(context: ContextTypes.DEFAULT_TYPE):
+    # Notificar resultados pendientes que aún no se hayan enviado a los grupos
+    await _notify_results(context)
+
     now_local = pd.Timestamp.now(tz=config.TIMEZONE)
     today_str = now_local.strftime('%Y-%m-%d')
     results   = sheets_db.get_daily_results(today_str)
@@ -1131,7 +1139,7 @@ def main():
         app.job_queue.run_daily(cron_market_scanner, h)
 
     app.job_queue.run_daily(daily_recap,             time(hour=23,minute=59,tzinfo=tz))
-    app.job_queue.run_repeating(cron_auto_settle,    interval=1800, first=60)
+    app.job_queue.run_repeating(cron_auto_settle,    interval=900,  first=60)
     app.job_queue.run_daily(cron_free_channel_nudge, time(hour=20,minute=0,tzinfo=tz))
 
     # TikTok automation (solo activo si TIKTOK_ENABLED=true en .env)
@@ -1139,7 +1147,7 @@ def main():
     app.job_queue.run_daily(cron_tiktok_results, time(hour=22, minute=0,  tzinfo=tz))
     app.job_queue.run_daily(cron_tiktok_recap,   time(hour=22, minute=30, tzinfo=tz))
 
-    print("[*] Jobs: 00:05 | 08:00 | 12:00 | 18:00 | settle cada 30min | 20:00 nudge | 23:59 recap")
+    print("[*] Jobs: 00:05 | 08:00 | 12:00 | 18:00(mañana) | settle cada 15min | 20:00 nudge | 23:59 recap")
     print(f"[*] TikTok automation: {'ACTIVO' if config.TIKTOK_ENABLED else 'DESACTIVADO'} | 08:00, 22:00, 22:30")
 
     conv_handler = ConversationHandler(

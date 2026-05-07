@@ -115,6 +115,13 @@ BANKROLL_INICIAL    = 1_000_000
 BASE_KELLY_FRACTION = 0.25
 MAX_STAKE_PERCENT   = 0.05
 
+# ── Modo de stake ──────────────────────────────────────────────────────────
+# "flat"  → apuesta siempre FLAT_STAKE_PERCENT del bankroll (recomendado
+#            hasta tener 200+ picks y CLV verificado).
+# "kelly" → Kelly fraccionado (BASE_KELLY_FRACTION × kelly_pct, cap MAX_STAKE_PERCENT).
+STAKE_MODE        = "flat"
+FLAT_STAKE_PERCENT = 0.02   # 2% fijo del bankroll por apuesta
+
 # ==========================================
 # CALIBRACIÓN DEL MODELO
 # ==========================================

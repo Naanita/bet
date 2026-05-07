@@ -136,6 +136,59 @@ class AdvancedPoissonModel:
                 result[f"{prefix}: Menos de {line} Goles"] = round(p_under, 4)
         return result
 
+    def get_correct_score_probs(self, max_goals: int = 4) -> dict:
+        """Probabilidad de cada marcador exacto hasta max_goals x max_goals."""
+        matrix = self._score_matrix(max_goals=max_goals + 1)
+        result = {}
+        for h in range(max_goals + 1):
+            for a in range(max_goals + 1):
+                result[f"Marcador {h}-{a}"] = round(float(matrix[h][a]), 5)
+        return result
+
+    def get_htft_probs(self) -> dict:
+        """Probabilidades de las 9 combinaciones Descanso/Final."""
+        ht_model = AdvancedPoissonModel(
+            base_home_xg=self.lambda_home * 0.42,
+            base_away_xg=self.lambda_away * 0.42,
+            apply_home_advantage=False,
+        )
+        ht = ht_model.get_1x2_probs()
+        ft = self.get_1x2_probs()
+        result = {}
+        combos = {
+            "HT/FT Local/Local":    (ht["Gana Local"],  ft["Gana Local"]),
+            "HT/FT Local/Empate":   (ht["Gana Local"],  ft["Empate"]),
+            "HT/FT Local/Visita":   (ht["Gana Local"],  ft["Gana Visita"]),
+            "HT/FT Empate/Local":   (ht["Empate"],      ft["Gana Local"]),
+            "HT/FT Empate/Empate":  (ht["Empate"],      ft["Empate"]),
+            "HT/FT Empate/Visita":  (ht["Empate"],      ft["Gana Visita"]),
+            "HT/FT Visita/Local":   (ht["Gana Visita"], ft["Gana Local"]),
+            "HT/FT Visita/Empate":  (ht["Gana Visita"], ft["Empate"]),
+            "HT/FT Visita/Visita":  (ht["Gana Visita"], ft["Gana Visita"]),
+        }
+        for key, (p_ht, p_ft) in combos.items():
+            result[key] = round(p_ht * p_ft, 5)
+        return result
+
+    def get_first_half_ou_probs(self) -> dict:
+        """O/U goles primer tiempo (lambda × 0.42)."""
+        result = {}
+        for line in (0.5, 1.5, 2.5):
+            lam_ht = (self.lambda_home + self.lambda_away) * 0.42
+            p_over = 1.0 - poisson.cdf(int(line), lam_ht)
+            result[f"1T Mas de {line}"]   = round(p_over, 4)
+            result[f"1T Menos de {line}"] = round(1.0 - p_over, 4)
+        return result
+
+    def get_clean_sheet_probs(self) -> dict:
+        """P(equipo no recibe gol) = P(Poisson(lambda_rival) = 0)."""
+        cs_local  = round(float(poisson.pmf(0, self.lambda_away)), 4)
+        cs_visita = round(float(poisson.pmf(0, self.lambda_home)), 4)
+        return {
+            "CS Local: Si":  cs_local,
+            "CS Visita: Si": cs_visita,
+        }
+
     def get_all_markets(self) -> dict:
         markets = {}
         markets.update(self.get_1x2_probs())
@@ -152,6 +205,10 @@ class AdvancedPoissonModel:
         markets.update(self.get_asian_handicap_probs(+1.5))
         markets.update(self.get_halftime_probs())
         markets.update(self.get_team_goals_probs())
+        markets.update(self.get_correct_score_probs())
+        markets.update(self.get_htft_probs())
+        markets.update(self.get_first_half_ou_probs())
+        markets.update(self.get_clean_sheet_probs())
         return markets
 
 

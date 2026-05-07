@@ -70,6 +70,17 @@ async def run_pipeline_v5(target_date: str, current_bankroll: float) -> list:
     _n_samples = max(_db_count, 20)
 
     # ─────────────────────────────────────────────
+    # 0. Captura CLV picks pendientes (cierre de mercado)
+    # ─────────────────────────────────────────────
+    try:
+        from modules.tracking import capture_clv_for_pending_bets
+        n_clv = await capture_clv_for_pending_bets()
+        if n_clv:
+            logger.info(f"CLV capturado para {n_clv} picks pendientes")
+    except Exception as _e:
+        logger.debug(f"CLV capture omitido: {_e}")
+
+    # ─────────────────────────────────────────────
     # 1. Scraping Rushbet — TODOS los deportes
     # ─────────────────────────────────────────────
     logger.info("Scraping Rushbet (todos los deportes)...")

@@ -181,6 +181,33 @@ def get_soccer_probs_from_rushbet(odds: dict, league: str = "DEFAULT") -> dict |
     if total_lambda is None or total_lambda < 0.5:
         return None
 
+    # Validación cruzada: si tenemos lambda desde O/U 2.5, verificar que las cuotas
+    # de O/U 1.5 y O/U 3.5 almacenadas sean consistentes (tolerancia ±0.20 en prob).
+    # Una inconsistencia grande indica que el scraper capturó un mercado de equipo
+    # individual en lugar del total del partido.
+    if over_25 and under_25:
+        for cv_line, cv_over_key, cv_under_key in [
+            (1.5, "Mas de 1.5", "Menos de 1.5"),
+            (3.5, "Mas de 3.5", "Menos de 3.5"),
+        ]:
+            cv_over  = odds.get(cv_over_key)
+            cv_under = odds.get(cv_under_key)
+            if cv_over and cv_under:
+                cv_fair = remove_vig({"over": cv_over, "under": cv_under})
+                if cv_fair:
+                    stored_prob  = cv_fair.get("over", 0)
+                    # P(Poisson(lambda) > cv_line)
+                    model_prob = 1.0 - poisson.cdf(int(cv_line), total_lambda)
+                    if abs(stored_prob - model_prob) > 0.15:
+                        logger.warning(
+                            f"Cuota O/U {cv_line} inconsistente con lambda={total_lambda:.2f}: "
+                            f"prob almacenada={stored_prob*100:.1f}% vs modelo={model_prob*100:.1f}% "
+                            f"— probablemente mercado de equipo capturado. Se eliminan esos picks."
+                        )
+                        # Limpiar esas cuotas del dict para que evaluate_picks no las use
+                        odds.pop(cv_over_key,  None)
+                        odds.pop(cv_under_key, None)
+
     home_lambda, away_lambda = split_lambda(total_lambda, league)
 
     # apply_home_advantage=False: split_lambda() ya capturó la ventaja local
@@ -346,6 +373,16 @@ def evaluate_picks(
         "Visita: Menos de 1.5 Goles":"⚽",
         "Visita: Mas de 2.5 Goles":  "⚽",
         "Visita: Menos de 2.5 Goles":"⚽",
+        # Primer tiempo
+        "1T Mas de 0.5":   "⏱️",
+        "1T Menos de 0.5": "⏱️",
+        "1T Mas de 1.5":   "⏱️",
+        "1T Menos de 1.5": "⏱️",
+        "1T Mas de 2.5":   "⏱️",
+        "1T Menos de 2.5": "⏱️",
+        # Clean Sheet
+        "CS Local: Si":  "🛡️",
+        "CS Visita: Si": "🛡️",
     }
 
     SPORT_ICONS = {"soccer": "⚽", "basketball": "🏀", "tennis": "🎾"}
@@ -356,8 +393,14 @@ def evaluate_picks(
             return MARKET_ICONS[m]
         if m.startswith("AH "):
             return "🔀"
-        if m.startswith("HT "):
+        if m.startswith("HT ") or m.startswith("1T "):
             return "⏱️"
+        if m.startswith("HT/FT "):
+            return "🔁"
+        if m.startswith("Marcador "):
+            return "🎰"
+        if m.startswith("CS "):
+            return "🛡️"
         if m.startswith("Local:") or m.startswith("Visita:"):
             return "⚽"
         if "Corners" in m:
@@ -373,35 +416,104 @@ def evaluate_picks(
     _GOALS_RE = _re.compile(r'^(Mas|Menos) de (\d+\.?\d*)$')
 
     def _label_market(m: str) -> str:
-        """
-        Convierte la clave interna al nombre legible para el usuario.
+        """Convierte clave interna a descripción clara para Telegram y Excel."""
 
-        Regla principal: claves del tipo "Mas de X.5" o "Menos de X.5"
-        (sin prefijo) son siempre mercados de GOLES — se les añade " Goles".
+        # ── O/U goles partido completo ──────────────────────────────────
+        # "Mas de 2.5" → "+2.5 goles (partido completo)"
+        g = _GOALS_RE.match(m)
+        if g:
+            direction = "Más de" if g.group(1) == "Mas" else "Menos de"
+            return f"{direction} {g.group(2)} goles (partido completo)"
 
-        Ejemplos:
-            "Mas de 0.5"           → "Mas de 0.5 Goles"
-            "Mas de 2.5"           → "Mas de 2.5 Goles"
-            "Menos de 1.5"         → "Menos de 1.5 Goles"
-            "Corners Mas de 9.5"   → (sin cambio — ya lleva prefijo)
-            "Tarjetas Mas de 3.5"  → (sin cambio)
-            "AH Local -0.5"        → "Hándicap Asiático Local -0.5"
-            "HT Gana Local"        → "1er Tiempo - Gana Local"
-        """
-        if _GOALS_RE.match(m):
-            return m + " Goles"
-        if m.startswith("AH Local"):
-            return m.replace("AH Local", "Hándicap Asiático Local")
-        if m.startswith("AH Visita"):
-            return m.replace("AH Visita", "Hándicap Asiático Visita")
-        if m == "HT Gana Local":   return "1er Tiempo - Gana Local"
-        if m == "HT Empate":       return "1er Tiempo - Empate"
-        if m == "HT Gana Visita":  return "1er Tiempo - Gana Visita"
-        # Team goals: "Local: Mas de 1.5 Goles" → "Local anota: Mas de 1.5 Goles"
-        if m.startswith("Local: "):
-            return "Local anota: " + m[len("Local: "):]
-        if m.startswith("Visita: "):
-            return "Visita anota: " + m[len("Visita: "):]
+        # ── 1X2 ─────────────────────────────────────────────────────────
+        if m == "Gana Local":   return "Gana local (90 min)"
+        if m == "Gana Visita":  return "Gana visitante (90 min)"
+        if m == "Empate":       return "Empate (90 min)"
+
+        # ── Doble Oportunidad ────────────────────────────────────────────
+        if m == "1X":  return "Local o empate"
+        if m == "X2":  return "Empate o visitante"
+        if m == "12":  return "Local o visitante (sin empate)"
+
+        # ── BTTS ─────────────────────────────────────────────────────────
+        if m == "Ambos Anotan: Si":  return "Ambos equipos anotan"
+        if m == "Ambos Anotan: No":  return "Al menos un equipo no anota"
+
+        # ── Goles por equipo ─────────────────────────────────────────────
+        # "Local: Mas de 1.5 Goles" → "Local anota más de 1.5 goles"
+        if m.startswith("Local: Mas de "):
+            n = m.replace("Local: Mas de ", "").replace(" Goles", "")
+            return f"Local anota más de {n} goles"
+        if m.startswith("Local: Menos de "):
+            n = m.replace("Local: Menos de ", "").replace(" Goles", "")
+            return f"Local anota menos de {n} goles"
+        if m.startswith("Visita: Mas de "):
+            n = m.replace("Visita: Mas de ", "").replace(" Goles", "")
+            return f"Visitante anota más de {n} goles"
+        if m.startswith("Visita: Menos de "):
+            n = m.replace("Visita: Menos de ", "").replace(" Goles", "")
+            return f"Visitante anota menos de {n} goles"
+
+        # ── O/U Primer Tiempo ────────────────────────────────────────────
+        if m.startswith("1T Mas de "):
+            n = m.replace("1T Mas de ", "")
+            return f"Más de {n} goles (1er tiempo)"
+        if m.startswith("1T Menos de "):
+            n = m.replace("1T Menos de ", "")
+            return f"Menos de {n} goles (1er tiempo)"
+
+        # ── Hándicap Asiático ────────────────────────────────────────────
+        if m.startswith("AH Local "):
+            h = m.replace("AH Local ", "")
+            return f"Hándicap Asiático local {h}"
+        if m.startswith("AH Visita "):
+            h = m.replace("AH Visita ", "")
+            return f"Hándicap Asiático visitante {h}"
+
+        # ── Resultado 1er Tiempo ─────────────────────────────────────────
+        if m == "HT Gana Local":   return "Gana local al descanso"
+        if m == "HT Empate":       return "Empate al descanso"
+        if m == "HT Gana Visita":  return "Gana visitante al descanso"
+
+        # ── Descanso / Final (HT/FT) ─────────────────────────────────────
+        _htft_labels = {
+            "HT/FT Local/Local":    "Descanso local → Final local",
+            "HT/FT Local/Empate":   "Descanso local → Final empate",
+            "HT/FT Local/Visita":   "Descanso local → Final visitante",
+            "HT/FT Empate/Local":   "Descanso empate → Final local",
+            "HT/FT Empate/Empate":  "Descanso empate → Final empate",
+            "HT/FT Empate/Visita":  "Descanso empate → Final visitante",
+            "HT/FT Visita/Local":   "Descanso visitante → Final local",
+            "HT/FT Visita/Empate":  "Descanso visitante → Final empate",
+            "HT/FT Visita/Visita":  "Descanso visitante → Final visitante",
+        }
+        if m in _htft_labels:
+            return _htft_labels[m]
+
+        # ── Marcador Exacto ──────────────────────────────────────────────
+        if m.startswith("Marcador "):
+            return "Marcador exacto: " + m[len("Marcador "):]
+
+        # ── Clean Sheet ──────────────────────────────────────────────────
+        if m == "CS Local: Si":   return "Local no recibe gol"
+        if m == "CS Visita: Si":  return "Visitante no recibe gol"
+
+        # ── Corners ──────────────────────────────────────────────────────
+        if m.startswith("Corners Mas de "):
+            n = m.replace("Corners Mas de ", "")
+            return f"Más de {n} corners (partido)"
+        if m.startswith("Corners Menos de "):
+            n = m.replace("Corners Menos de ", "")
+            return f"Menos de {n} corners (partido)"
+
+        # ── Tarjetas ─────────────────────────────────────────────────────
+        if m.startswith("Tarjetas Mas de "):
+            n = m.replace("Tarjetas Mas de ", "")
+            return f"Más de {n} tarjetas (partido)"
+        if m.startswith("Tarjetas Menos de "):
+            n = m.replace("Tarjetas Menos de ", "")
+            return f"Menos de {n} tarjetas (partido)"
+
         return m
 
     picks = []
@@ -443,7 +555,7 @@ def evaluate_picks(
             continue
 
         import config as _cfg
-        stake_lvl  = RiskEngine.stake_level(stake, current_bankroll, _cfg.MAX_STAKE_PERCENT)
+        stake_lvl  = RiskEngine.stake_level(stake, current_bankroll, _cfg.MAX_STAKE_PERCENT, ev=ev)
         outcome_id = str(odds.get(f"__oid_{market}", ""))
 
         if p_cal >= 0.72:   confidence = "🔥 MUY ALTA"

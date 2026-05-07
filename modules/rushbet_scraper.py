@@ -231,12 +231,18 @@ def _parse_full_event(home: str, away: str, sport: str,
                     continue
                 if otype == "OT_OVER":
                     key = f"Mas de {line_pts}"
-                    if key not in odds_dict:
+                    # Para Over: el partido completo SIEMPRE tiene cuota menor que
+                    # un mercado de equipo individual (más fácil que el total supere X).
+                    # Guardamos el mínimo para descartar mercados de equipo que se
+                    # cuelen aquí con criterion_en="Total Goals".
+                    if key not in odds_dict or decimal < odds_dict[key]:
                         odds_dict[key] = decimal
                         outcome_ids[f"__oid_{key}"] = o.get("id", "")
                 elif otype == "OT_UNDER":
                     key = f"Menos de {line_pts}"
-                    if key not in odds_dict:
+                    # Para Under: el partido completo SIEMPRE tiene cuota mayor que
+                    # un mercado de equipo (es menos probable que el total quede bajo).
+                    if key not in odds_dict or decimal > odds_dict[key]:
                         odds_dict[key] = decimal
                         outcome_ids[f"__oid_{key}"] = o.get("id", "")
 
@@ -341,6 +347,103 @@ def _parse_full_event(home: str, away: str, sport: str,
                 if otype == "OT_ONE":   odds_dict["HT Gana Local"]  = _kambi_odd_to_decimal(raw)
                 elif otype == "OT_CROSS": odds_dict["HT Empate"]    = _kambi_odd_to_decimal(raw)
                 elif otype == "OT_TWO": odds_dict["HT Gana Visita"] = _kambi_odd_to_decimal(raw)
+
+        # ── Marcador Exacto (Correct Score) ──
+        # Kambi: criterion_en = "Correct Score" | outcomes con label "0-0", "1-0", etc.
+        elif sport == "soccer" and (
+             criterion_en in ["Correct Score", "Score Cast"] or
+             "correct score" in en_lower):
+            for o in outcomes:
+                raw   = o.get("odds", 0)
+                label = o.get("label", "").strip()
+                oid   = o.get("id", "")
+                if not raw or not label: continue
+                decimal = _kambi_odd_to_decimal(raw)
+                # Solo marcadores hasta 4-4 para no explotar el dict
+                parts = label.replace(" ", "").split("-")
+                if len(parts) == 2:
+                    try:
+                        h, a = int(parts[0]), int(parts[1])
+                        if h <= 4 and a <= 4:
+                            key = f"Marcador {h}-{a}"
+                            if key not in odds_dict:
+                                odds_dict[key] = decimal
+                                outcome_ids[f"__oid_{key}"] = oid
+                    except ValueError:
+                        pass
+
+        # ── Descanso/Final (HT/FT) ──
+        # Kambi: criterion_en = "Half Time/Full Time" | outcomes con label "1/1", "1/X", etc.
+        elif sport == "soccer" and (
+             criterion_en in ["Half Time/Full Time", "HT/FT"] or
+             "half time/full time" in en_lower or "ht/ft" in en_lower):
+            for o in outcomes:
+                raw   = o.get("odds", 0)
+                label = o.get("label", "").strip().upper()
+                oid   = o.get("id", "")
+                if not raw or not label: continue
+                # Normalizar: "1/1" → "HT1FT1", "X/2" → "HTXFTVisita", etc.
+                _htft_map = {
+                    "1/1": "HT/FT Local/Local",   "1/X": "HT/FT Local/Empate",
+                    "1/2": "HT/FT Local/Visita",  "X/1": "HT/FT Empate/Local",
+                    "X/X": "HT/FT Empate/Empate", "X/2": "HT/FT Empate/Visita",
+                    "2/1": "HT/FT Visita/Local",  "2/X": "HT/FT Visita/Empate",
+                    "2/2": "HT/FT Visita/Visita",
+                }
+                key = _htft_map.get(label)
+                if key and key not in odds_dict:
+                    odds_dict[key] = _kambi_odd_to_decimal(raw)
+                    outcome_ids[f"__oid_{key}"] = oid
+
+        # ── O/U Primer Tiempo (1st Half Goals) ──
+        elif sport == "soccer" and (
+             ("1st half" in en_lower or "first half" in en_lower or
+              "primer tiempo" in es_lower or "1er tiempo" in es_lower) and
+             ("goal" in en_lower or "gol" in es_lower) and
+             "team" not in en_lower and "home" not in en_lower and "away" not in en_lower):
+            for o in outcomes:
+                raw      = o.get("odds", 0)
+                otype    = o.get("type", "")
+                line_val = o.get("line", 0)
+                if not raw or not line_val: continue
+                decimal  = _kambi_odd_to_decimal(raw)
+                line_pts = round(line_val / 1000, 1)
+                if line_pts not in (0.5, 1.5, 2.5):
+                    continue
+                if otype == "OT_OVER":
+                    key = f"1T Mas de {line_pts}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
+                elif otype == "OT_UNDER":
+                    key = f"1T Menos de {line_pts}"
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = o.get("id", "")
+
+        # ── Clean Sheet (Sin recibir gol) ──
+        elif sport == "soccer" and (
+             "clean sheet" in en_lower or "sin recibir" in es_lower):
+            for o in outcomes:
+                raw   = o.get("odds", 0)
+                label = o.get("label", "").lower()
+                oid   = o.get("id", "")
+                if not raw: continue
+                decimal = _kambi_odd_to_decimal(raw)
+                # Kambi usa OT_YES/OT_NO o labels "Home"/"Away" según variante
+                otype = o.get("type", "").upper()
+                if otype == "OT_YES" or "si" in label or "yes" in label:
+                    participant = o.get("participantId", "")
+                    # Determinar si es local o visita por participantId o label
+                    if "home" in label or "local" in label:
+                        key = "CS Local: Si"
+                    elif "away" in label or "visita" in label:
+                        key = "CS Visita: Si"
+                    else:
+                        continue
+                    if key not in odds_dict:
+                        odds_dict[key] = decimal
+                        outcome_ids[f"__oid_{key}"] = oid
 
         # ── Asian Handicap ──
         # Kambi: criterion_en = "Asian Handicap" | line = handicap × 1000

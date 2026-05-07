@@ -188,13 +188,14 @@ class RiskEngine:
         fraction: float = config.BASE_KELLY_FRACTION,
     ) -> float:
         """
-        Kelly Fraccional — stake óptimo en COP.
-
-        stake = bankroll × min(kelly_pct × fraction, MAX_STAKE_PERCENT)
-        donde kelly_pct = (b×p − q) / b
-
-        Siempre pasar la probabilidad CALIBRADA, no la del modelo crudo.
+        Stake por apuesta. Respeta config.STAKE_MODE:
+          "flat"  → bankroll × FLAT_STAKE_PERCENT (independiente del EV)
+          "kelly" → Kelly fraccionado con cap MAX_STAKE_PERCENT
         """
+        if getattr(config, "STAKE_MODE", "kelly") == "flat":
+            flat_pct = getattr(config, "FLAT_STAKE_PERCENT", 0.02)
+            return round(bankroll * flat_pct, 2)
+
         q = 1.0 - probability
         b = odds - 1.0
         if b <= 0:
@@ -207,11 +208,16 @@ class RiskEngine:
 
     @staticmethod
     def stake_level(stake_amount: float, bankroll: float,
-                    max_stake_pct: float = 0.05) -> int:
+                    max_stake_pct: float = 0.05,
+                    ev: float | None = None) -> int:
         """
-        Mapea el stake de Kelly a una escala 1-10 para display.
-        1 = edge mínimo aceptable, 10 = stake máximo permitido.
+        Escala de confianza 1-10 para display.
+        - Modo flat: basada en EV (5%→1, 10%→5, 15%→8, 20%→10)
+        - Modo kelly: proporcional al stake relativo al máximo permitido
         """
+        if getattr(config, "STAKE_MODE", "kelly") == "flat" and ev is not None:
+            # EV en decimal (0.05 = 5%)
+            return max(1, min(10, round(ev / 0.02)))
         max_stake = bankroll * max_stake_pct
         if max_stake <= 0 or stake_amount <= 0:
             return 1
